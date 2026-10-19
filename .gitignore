@@ -1,0 +1,17 @@
+# Dữ liệu: đề yêu cầu repo KHÔNG chứa dữ liệu
+data/
+*.parquet
+*.tar.gz
+*.zip
+
+# Bí mật: KHÔNG BAO GIỜ commit API key
+.env
+
+# Rác của Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Rác của hệ điều hành / editor
+.DS_Store
+.vscode/
