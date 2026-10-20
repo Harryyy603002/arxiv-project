@@ -6,3 +6,4 @@ pyarrow
 psutil
 rapidfuzz
 scikit-learn
+huggingface_hub
