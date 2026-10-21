@@ -48,3 +48,22 @@ Muốn đổi định dạng của dòng nào: báo cả nhóm và cập nhật 
 | Tri | References |
 | Nguyen | Text & Model |
 | Khai | Data, Report & Delivery |
+
+
+## Chạy pipeline
+
+```bash
+python src/run_m1.py
+python src/run_m2.py
+python src/run_m3.py
+```
+
+## Tài liệu nhãn và feature (M3)
+
+### Định dạng nhãn
+<P4 điền: file nhãn nằm ở đâu, cột nào, cách gán tay, cách gán tự động>
+
+### Danh sách feature
+| Feature | Ý tưởng | Người phụ trách |
+|---|---|---|
+| <tên feature> | <vì sao feature này giúp ghép đúng> | <P1/P2/P3> |
