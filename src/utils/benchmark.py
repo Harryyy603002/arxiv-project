@@ -7,7 +7,7 @@ Mục đích: Đo thời gian chạy và RAM tối đa (psutil) của pipeline
 Đầu vào: Hàm cần đo
 Đầu ra:  Số liệu thời gian và bộ nhớ cho báo cáo
 
-Ghi chú: dùng src/config.py để tạo đường dẫn (paper_dir, version_dir).
+Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
 Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
 """
 

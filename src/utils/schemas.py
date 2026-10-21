@@ -7,7 +7,7 @@ Mục đích: Schema pyarrow tường minh cho 6 bảng: papers, references, ele
 Đầu vào: Đặc tả cột trong đề của 3 milestone
 Đầu ra:  Các schema dùng khi xuất Parquet
 
-Ghi chú: dùng src/config.py để tạo đường dẫn (paper_dir, version_dir).
+Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
 Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
 """
 

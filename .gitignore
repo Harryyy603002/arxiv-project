@@ -1,17 +1,49 @@
 # Dữ liệu: đề yêu cầu repo KHÔNG chứa dữ liệu
 data/
 *.parquet
+*.csv
+*.jsonl
+*.tar
 *.tar.gz
+*.tgz
+*.gz
 *.zip
+*.pkl
+*.joblib
+
+# File không phải mã nguồn (poster nộp qua Moodle)
+poster/
+*.pptx
+*.pdf
+*.docx
+
+# Source arXiv tải về (chỉ nằm trong data/)
+*.tex
+*.bib
+*.bbl
 
 # Bí mật: KHÔNG BAO GIỜ commit API key
 .env
+.env.*
 
 # Rác của Python
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
 .ipynb_checkpoints/
+
+# Môi trường ảo
+venv/
+.venv/
+
+# Log và checkpoint crawl
+*.log
+logs/
+checkpoints/
+cache/
 
 # Rác của hệ điều hành / editor
 .DS_Store
+Thumbs.db
 .vscode/

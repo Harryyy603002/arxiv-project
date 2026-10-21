@@ -7,11 +7,11 @@ Mục đích: Dựng cây Document > Section > ... > lá (câu, công thức kh�
 Đầu vào: Nội dung các file từ m2_gather
 Đầu ra:  data/<paper_key>/vN/tree_raw.json
 
-Ghi chú: dùng src/config.py để tạo đường dẫn (paper_dir, version_dir).
+Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
 Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
 """
 
-from config import DATA_DIR, paper_dir, version_dir  # noqa: F401
+from utils.config import DATA_DIR, paper_dir, version_dir  # noqa: F401
 
 
 def main():
