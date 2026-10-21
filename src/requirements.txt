@@ -7,3 +7,4 @@ psutil
 rapidfuzz
 scikit-learn
 huggingface_hub
+pytest
