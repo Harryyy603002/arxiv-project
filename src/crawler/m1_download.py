@@ -39,7 +39,7 @@ from pathlib import Path, PurePosixPath
 
 import requests
 
-from config import paper_dir, version_dir
+from ..utils.config import paper_dir, version_dir
 
 # ----------------------------------------------------------------------------
 # CẤU HÌNH
