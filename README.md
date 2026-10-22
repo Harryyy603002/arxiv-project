@@ -89,6 +89,7 @@ Version chỉ có PDF vẫn phải có thư mục `vN/` (rỗng). M2 coi đó l�
 | 5 | Tri → Khai | `<paper_key>/bibtex_merged.json` | Đúng cột bảng `bibtex`: `arxiv_id, citation_key, entry_type, title, authors, year, doi, journal, url` |
 | 6 | Nguyen → Khai | `<paper_key>/elements.json`, `hierarchy.json` | Đúng cột bảng `elements` (`element_id, arxiv_id, kind, content`) và `hierarchy` (`arxiv_id, version, element_id, parent_id`) |
 | 7 | Cả nhóm | `labels/manual_labels.csv`, `auto_labels.csv` | Cột: `arxiv_id,citation_key,groundtruth_arxiv_id` (để trống nếu không có đáp án) |
+| 8 | P1 → cả nhóm | `data/<paper_key>/vN/source_status.json` | Trạng thái tải của từng version: `ok` hoặc `empty` kèm lý do |
 
 Hai lưu ý chéo giữa các mảng:
 - Nội dung câu trong `elements` phải **giữ nguyên lệnh `\cite{...}`**, vì Quoc dùng chúng để tính feature ngữ cảnh ở M3.
