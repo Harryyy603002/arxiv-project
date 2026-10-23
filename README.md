@@ -37,10 +37,16 @@ pip install -r src/requirements.txt
 
 **Cấu hình biến môi trường (tuyệt đối không commit API key):**
 
-- Colab: dùng Colab Secrets.
 - Máy cá nhân: đặt biến môi trường hoặc tạo file `.env` (đã bị `.gitignore`):
   - `S2_API_KEY`: API key của Semantic Scholar (dùng cho crawler reference).
   - `CONTACT_EMAIL`: Email liên hệ gắn vào header `User-Agent` khi tải source từ arXiv.
+
+- Colab: mở bảng *Secrets* (biểu tượng chìa khóa), thêm secret tên S2_API_KEY và bật quyền truy cập cho notebook. Chạy cell sau trước khi chạy pipeline để biến môi trường được truyền cho các tiến trình Python:
+
+  import os
+  from google.colab import userdata
+
+  os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
 
 Tên biến phải khớp với cái `src/utils/config.py` đọc.
 

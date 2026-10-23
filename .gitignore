@@ -24,7 +24,7 @@ poster/
 
 # Bí mật: KHÔNG BAO GIỜ commit API key
 .env
-.env.*
+.env
 
 # Rác của Python
 __pycache__/

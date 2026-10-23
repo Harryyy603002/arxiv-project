@@ -8,3 +8,4 @@ rapidfuzz
 scikit-learn
 huggingface_hub
 pytest
+python-dotenv

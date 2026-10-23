@@ -5,7 +5,8 @@ Các chỉ số theo đề:
               từng giai đoạn, tổng thời gian end-to-end.
   Bộ nhớ    : RAM tối đa, RAM trung bình, dung lượng đĩa tối đa,
               dung lượng đầu ra cuối cùng.
-  M1        : dung lượng bài báo trước và sau khi loại bỏ hình ảnh; tỉ lệ thành công.
+  M1        : dung lượng bài báo trước và sau khi loại bỏ hình ảnh; tỉ lệ thành công
+              crawl bài báo & crawl references; số lượng reference trung bình mỗi bài.
   M2        : số element / bibtex trước và sau deduplication; tỉ lệ parse thành công.
   M3        : đề không yêu cầu benchmark riêng; dùng stage() để đo từng bước
               (cleaning, labelling, features, training, evaluation) nếu cần cho poster.
@@ -18,61 +19,24 @@ Các chỉ số theo đề:
 
 RAM được tính theo cả cây tiến trình (tiến trình chính + mọi tiến trình con),
 đúng yêu cầu "tổng bộ nhớ của toàn hệ thống" khi có nhiều chương trình.
-
-Cách 1: nhúng vào code (mỗi milestone một file kết quả riêng)
-  M1:
-    from utils.benchmark import PerfRecorder
-
-    with PerfRecorder("m1", watch_dirs=["data"]) as perf:
-        with perf.stage("discovery"):
-            versions = resolve_ids(ids)
-        for aid in ids:
-            with perf.paper(aid):
-                ok = True
-                for v in versions[aid]:
-                    archive_b, raw_b, clean_b, is_pdf = download_and_extract(aid, v)
-                    perf.record_paper_size(aid, before_bytes=raw_b, after_bytes=clean_b,
-                                           archive_bytes=archive_b, is_pdf_only=is_pdf)
-                perf.record_result(aid, ok)
-    perf.save()                      # -> data/benchmark_m1.json
-
-  M2:
-    with PerfRecorder("m2", watch_dirs=["data"]) as perf:
-        for aid in ids:
-            with perf.paper(aid):
-                n_el_before, n_el_after, n_bib_before, n_bib_after = parse_one(aid)
-                perf.record_dedup(aid, "elements", n_el_before, n_el_after)
-                perf.record_dedup(aid, "bibtex", n_bib_before, n_bib_after)
-                perf.record_result(aid, True)
-    perf.save()                      # -> data/benchmark_m2.json
-
-  M3 (tùy chọn):
-    with PerfRecorder("m3") as perf:
-        with perf.stage("features"): ...
-        with perf.stage("training"): ...
-    perf.save()                      # -> data/benchmark_m3.json
-
-Cách 2: đo end-to-end một lệnh bất kỳ
-    python src/utils/benchmark.py --milestone m1 --watch data -- python src/run_m1.py
-    python src/utils/benchmark.py --milestone m2 --watch data -- python src/run_m2.py
-  (Cách 2 chỉ có wall time, RAM, đĩa; không có thời gian từng bài hay thống kê khác.)
-
-Lưu ý: khi chạy trên Colab, --watch nên trỏ vào thư mục local (/content/...),
-không trỏ vào Google Drive mount vì quét rất chậm.
 """
 from __future__ import annotations
 
 import argparse
+import gzip
+import io
 import json
 import os
 import statistics
 import subprocess
 import sys
+import tarfile
 import threading
 import time
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import psutil
 
@@ -93,6 +57,47 @@ def dir_size(path: Path | str) -> int:
 
 def _watched_size(dirs: Iterable[Path]) -> int:
     return sum(dir_size(d) for d in dirs if Path(d).exists())
+
+
+def inspect_archive_bytes(data: bytes, extracted_dir: Optional[Path] = None) -> Tuple[int, int, int]:
+    """Tính (archive_bytes, before_bytes, after_bytes) từ gói dữ liệu source tải về.
+
+    - archive_bytes : kích thước gói tải về (len(data)).
+    - before_bytes  : tổng kích thước giải nén của mọi file trong gói (gồm cả hình ảnh, .pdf, .sty...).
+    - after_bytes   : tổng kích thước các file .tex và .bib được giữ lại trong extracted_dir.
+    """
+    archive_bytes = len(data)
+    after_bytes = 0
+    if extracted_dir and extracted_dir.exists():
+        for p in extracted_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in {".tex", ".bib"}:
+                try:
+                    after_bytes += p.stat().st_size
+                except OSError:
+                    pass
+
+    # Trường hợp 1: PDF-only
+    if data[:4] == b"%PDF":
+        return archive_bytes, archive_bytes, 0
+
+    # Trường hợp 2: tar archive (.tar.gz)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+            before_bytes = sum(m.size for m in tar.getmembers() if m.isfile())
+            return archive_bytes, max(before_bytes, after_bytes), after_bytes
+    except (tarfile.ReadError, EOFError, OSError, zlib.error):
+        pass
+
+    # Trường hợp 3: single .gz file
+    if data[:2] == b"\x1f\x8b":
+        try:
+            raw = gzip.decompress(data)
+            return archive_bytes, len(raw), after_bytes
+        except (OSError, EOFError, zlib.error):
+            return archive_bytes, archive_bytes, after_bytes
+
+    # Trường hợp 4: plain text / unknown
+    return archive_bytes, max(archive_bytes, after_bytes), after_bytes
 
 
 class ResourceMonitor:
@@ -206,7 +211,7 @@ class ResourceMonitor:
 
 
 class PerfRecorder:
-    """Đo thời gian (tổng, từng giai đoạn, từng bài), kích thước, dedup và tài nguyên của một lần chạy."""
+    """Đo thời gian (tổng, từng giai đoạn, từng bài), kích thước, references, dedup và tài nguyên."""
 
     def __init__(
         self,
@@ -222,6 +227,8 @@ class PerfRecorder:
 
         # Kết quả thành công / thất bại theo bài (M1: crawl, M2: parse)
         self.results: Dict[str, bool] = {}
+        # Thống kê reference (M1): {arxiv_id: {"ok": bool, "total": int, "with_arxiv": int}}
+        self.ref_stats: Dict[str, Dict[str, int | bool]] = {}
         # Dedup (M2): {kind: {arxiv_id: [before, after]}}, cộng dồn nếu gọi lại
         self.dedup: Dict[str, Dict[str, List[int]]] = {}
 
@@ -316,6 +323,15 @@ class PerfRecorder:
         with self._lock:
             self.results[arxiv_id] = bool(ok)
 
+    def record_references(self, arxiv_id: str, ok: bool, total_refs: int = 0, arxiv_refs: int = 0) -> None:
+        """Ghi thống kê crawl reference của một bài (M1)."""
+        with self._lock:
+            self.ref_stats[arxiv_id] = {
+                "ok": bool(ok),
+                "total": int(total_refs),
+                "with_arxiv": int(arxiv_refs),
+            }
+
     def record_dedup(self, arxiv_id: str, kind: str, before: int, after: int) -> None:
         """Ghi số lượng trước/sau deduplication của một bài (M2), vd kind='elements' hoặc 'bibtex'."""
         with self._lock:
@@ -349,6 +365,19 @@ class PerfRecorder:
                 n_ok=n_ok,
                 n_failed=len(self.results) - n_ok,
                 success_rate=round(n_ok / len(self.results), 4),
+            )
+
+        if self.ref_stats:
+            ref_ok = [v for v in self.ref_stats.values() if v["ok"]]
+            n_ref_ok = len(ref_ok)
+            totals = [int(v["total"]) for v in ref_ok]
+            with_arxiv = [int(v["with_arxiv"]) for v in ref_ok]
+            out.update(
+                ref_n_ok=n_ref_ok,
+                ref_n_failed=len(self.ref_stats) - n_ref_ok,
+                ref_success_rate=round(n_ref_ok / len(self.ref_stats), 4),
+                avg_refs_per_paper=round(statistics.fmean(totals), 2) if totals else 0.0,
+                avg_arxiv_refs_per_paper=round(statistics.fmean(with_arxiv), 2) if with_arxiv else 0.0,
             )
 
         if self.dedup:
@@ -397,6 +426,8 @@ class PerfRecorder:
                 }
             if self.results:
                 data["paper_results"] = dict(self.results)
+            if self.ref_stats:
+                data["paper_references"] = dict(self.ref_stats)
             if self.dedup:
                 data["paper_dedup"] = {
                     kind: {k: {"before": v[0], "after": v[1]} for k, v in per.items()}
