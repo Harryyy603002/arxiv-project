@@ -63,6 +63,7 @@ data/
 ├── papers.csv, papers.parquet          # bảng papers gộp
 ├── references.csv, references.parquet  # bảng references gộp (chỉ giữ ref có arXiv ID)
 ├── failed_ids.txt                      # ID không tồn tại / lỗi (không phải bug)
+├── benchmark_m1.json                   # kết quả đo hiệu năng M1 (không commit)
 ├── labels/
 │   ├── manual_labels.csv
 │   └── auto_labels.csv
@@ -173,9 +174,10 @@ Muốn đổi định dạng của dòng nào: báo cả nhóm và cập nhật 
 Chạy từ thư mục gốc của repo:
 
 ```bash
-python src/run_m1.py
+python src/run_m1.py --range XXXX.XXXXX-XXXX.XXXXX  # thay bằng khoảng ID của mình (xem bảng dưới)
 python src/run_m2.py
 python src/run_m3.py
+```
 ```
 
 Khoảng arXiv ID được phân công (mỗi người 5.000 ID trên máy riêng, tổng 20.000 bài, rồi gộp dữ liệu qua Drive chung):
@@ -196,7 +198,13 @@ python src/crawler/m1_references.py --range <khoảng_ID>
 
 Một số ID trong khoảng có thể không tồn tại (bị rút/gộp). Chúng được ghi vào `data/failed_ids.txt` và không phải lỗi.
 
-Kiểm thử: `pytest src/tests`
+Kiểm thử: `pytest src/tests` (đã có `pytest.ini` đặt `pythonpath = src`).
+
+### Đo hiệu năng
+Đo trên Colab (CPU), với thư mục `data/` trống, chạy bằng `python src/run_m1.py ...`.
+Kết quả nằm ở `data/benchmark_m1.json`. Chỉ số: thời gian từng giai đoạn, RAM tối đa/trung bình,
+đĩa tối đa, dung lượng đầu ra. Có thể đo end-to-end bên ngoài bằng
+`python src/utils/benchmark.py --milestone m1 --watch data -- python src/run_m1.py ...`.
 
 ## 8. Tài liệu nhãn và feature (M3)
 
