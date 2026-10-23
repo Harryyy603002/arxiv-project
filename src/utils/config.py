@@ -13,6 +13,12 @@ import re
 from pathlib import Path
 from typing import Dict, Iterator, Optional, Tuple
 
+# --- Tự động nạp biến môi trường từ file .env nếu có ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 # ---------------------------------------------------------------- thư mục
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]  # src/utils/config.py
 DATA_DIR: Path = Path(os.environ.get("ARXIV_DATA_DIR", PROJECT_ROOT / "data")).expanduser()
