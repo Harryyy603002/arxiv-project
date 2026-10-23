@@ -31,6 +31,7 @@ import gzip
 import io
 import json
 import re
+import sys
 import tarfile
 import time
 import zlib
@@ -39,12 +40,12 @@ from pathlib import Path, PurePosixPath
 
 import requests
 
-from src.utils.config import paper_dir, version_dir
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils.config import CONTACT_EMAIL, paper_dir, version_dir
 
 # ----------------------------------------------------------------------------
 # CẤU HÌNH
 # ----------------------------------------------------------------------------
-CONTACT_EMAIL = "thienquocface06@gmail.com" 
 USER_AGENT = (
     "arxiv-course-project-crawler/1.0 "
     f"(student project; contact: {CONTACT_EMAIL})"
@@ -269,7 +270,13 @@ def read_versions(arxiv_id: str, fallback_n: int | None) -> list[int]:
     f = paper_dir(arxiv_id) / "versions.json"
     if f.exists():
         info = json.loads(f.read_text(encoding="utf-8"))
-        return [int(v) for v in info["versions"]]
+        versions = []
+        for item in info.get("versions", []):
+            value = item.get("version") if isinstance(item, dict) else item
+            if isinstance(value, str):
+                value = value.removeprefix("v")
+            versions.append(int(value))
+        return versions
     if fallback_n:
         return list(range(1, fallback_n + 1))
     return []
