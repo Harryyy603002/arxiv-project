@@ -182,7 +182,7 @@ Khoảng arXiv ID được phân công (mỗi người 5.000 ID trên máy riên
 
 | Người | Khoảng ID | Lệnh lấy metadata |
 | --- | --- | --- |
-| Quoc | 2512.23231 → 2601.03155 | `python src/crawler/m1_metadata.py --range 2512.23231-2601.03155 --month-last 2512=<ID cuối tháng 12/2025>` |
+| Quoc | 2512.23231 → 2601.03155 | `python src/crawler/m1_metadata.py --range 2512.23231-2601.03155 --month-last 2512=25075` |
 | Nguyen | 2602.04870 → 2602.09869 | `python src/crawler/m1_metadata.py --range 2602.04870-2602.09869` |
 | Khai | 2603.00580 → 2603.05579 | `python src/crawler/m1_metadata.py --range 2603.00580-2603.05579` |
 | Tri | 2606.20734 → 2606.25733 | `python src/crawler/m1_metadata.py --range 2606.20734-2606.25733` |
@@ -190,7 +190,7 @@ Khoảng arXiv ID được phân công (mỗi người 5.000 ID trên máy riên
 Sau khi lấy metadata, chạy tiếp tải source và crawl reference cho cùng khoảng ID (thêm `--limit 5` nếu muốn chạy thử):
 
 ```bash
-python src/crawler/m1_source.py --range <khoảng_ID>
+python src/crawler/m1_download.py --range <khoảng_ID>
 python src/crawler/m1_references.py --range <khoảng_ID>
 ```
 
