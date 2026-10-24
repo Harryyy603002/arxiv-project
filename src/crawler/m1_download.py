@@ -6,15 +6,20 @@ Mục đích: Tải mã nguồn LaTeX của từng version bài báo từ arXiv,
           .tex và .bib. Version không có TeX (chỉ có PDF...) vẫn được ghi lại
           dưới dạng "bản ghi rỗng" thay vì bị bỏ qua.
 
-Đầu vào:  data/<paper_key>/versions.json (do P3 tạo) và danh sách arXiv ID
+Đầu vào:  data/<paper_key>/versions.json (do P3 tạo) và khoảng/danh sách arXiv ID
 Đầu ra:   data/<paper_key>/vN/*.tex, *.bib và vN/source_status.json
+          (status, reason, raw_bytes = dung lượng gốc, extracted_bytes = sau khi chỉ giữ .tex/.bib)
 
-Cách chạy (từ thư mục gốc của repo):
-    # Thử nhanh 3 bài, chỉ version 1:
-    python src/m1_download.py --ids 1706.03762 1810.04805 1512.03385 --versions 1
+Cách chạy (từ thư mục gốc của repo). Email liên hệ lấy từ biến môi trường CONTACT_EMAIL.
+    # Thử nhanh 3 bài đầu của khoảng ID:
+    python src/crawler/m1_download.py --range 2512.23231-2601.03155 --month-last 2512=25075 --limit 3
 
-    # Chạy thật, đọc danh sách ID từ file (mỗi dòng một ID):
-    python src/m1_download.py --ids-file data/ids.txt
+    # Chạy thật cả khoảng (khoảng qua nhiều tháng cần --month-last <yymm>=<số cuối của tháng>):
+    python src/crawler/m1_download.py --range 2512.23231-2601.03155 --month-last 2512=25075
+
+    # Hoặc đọc danh sách ID từ file (mỗi dòng một ID) / liệt kê trực tiếp:
+    python src/crawler/m1_download.py --ids-file ids.txt
+    python src/crawler/m1_download.py --ids 2512.23231 2512.23232
 
 Đặc điểm:
   - Lịch sự với server arXiv: chờ >= 3 giây giữa 2 request, chỉ 1 kết nối,
@@ -41,7 +46,8 @@ from pathlib import Path, PurePosixPath
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils.config import CONTACT_EMAIL, paper_dir, version_dir
+from utils.config import (CONTACT_EMAIL, iter_id_range, paper_dir, parse_id_range,
+                          parse_month_last, version_dir)
 
 # ----------------------------------------------------------------------------
 # CẤU HÌNH
@@ -233,6 +239,8 @@ def process_version(session: requests.Session, arxiv_id: str, version: int) -> s
         "status": status,        # "ok" hoặc "empty"
         "reason": reason,        # lý do nếu rỗng
         "files": files,          # các file .tex/.bib đã lưu
+        "raw_bytes": len(data),  # dung lượng file tải về (TRƯỚC khi bỏ hình/file khác)
+        "extracted_bytes": sum((out_dir / f).stat().st_size for f in files),  # SAU khi chỉ giữ .tex/.bib
         "source_url": f"{BASE_URL}/{arxiv_id}v{version}",
         "downloaded_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -254,14 +262,18 @@ def normalize_id(raw: str) -> str:
 
 
 def load_ids(args: argparse.Namespace) -> list[str]:
-    ids: list[str] = list(args.ids or [])
+    ids: list[str] = []
+    if args.range:
+        ids += iter_id_range(*parse_id_range(args.range), parse_month_last(args.month_last))
+    ids += list(args.ids or [])
     if args.ids_file:
         for line in Path(args.ids_file).read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 ids.append(line)
     cleaned = [normalize_id(x) for x in ids if x.strip()]
-    return list(dict.fromkeys(cleaned))  # bỏ trùng, giữ thứ tự
+    ids = list(dict.fromkeys(cleaned))  # bỏ trùng, giữ thứ tự
+    return ids[:args.limit] if args.limit else ids
 
 
 def read_versions(arxiv_id: str, fallback_n: int | None) -> list[int]:
@@ -284,6 +296,10 @@ def read_versions(arxiv_id: str, fallback_n: int | None) -> list[int]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tải source LaTeX từ arXiv (M1).")
+    p.add_argument("--range", help="START-END, vd. 2602.04870-2602.09869")
+    p.add_argument("--month-last", nargs="*", default=[],
+                   help="vd. 2512=25075 (số ID cuối của tháng, dùng khi khoảng qua nhiều tháng)")
+    p.add_argument("--limit", type=int, help="chỉ xử lý N ID đầu (để chạy thử)")
     p.add_argument("--ids", nargs="*", help="Một hoặc nhiều arXiv ID")
     p.add_argument("--ids-file", help="File text, mỗi dòng một arXiv ID")
     p.add_argument("--versions", type=int, default=None,
@@ -295,22 +311,24 @@ def main() -> None:
     args = parse_args()
     ids = load_ids(args)
     if not ids:
-        print("Chưa có arXiv ID nào. Dùng --ids hoặc --ids-file.")
+        print("Chưa có arXiv ID nào. Dùng --range, --ids hoặc --ids-file.")
         return
     if "example.com" in CONTACT_EMAIL:
-        print("CẢNH BÁO: hãy sửa CONTACT_EMAIL ở đầu file thành email thật.")
+        print("CẢNH BÁO: chưa đặt biến môi trường CONTACT_EMAIL (email thật), arXiv dùng nó để liên lạc.")
 
     session = requests.Session()  # 1 session = 1 kết nối, đúng yêu cầu
     session.headers.update({"User-Agent": USER_AGENT})
 
-    counts = {"ok": 0, "empty": 0, "skipped": 0, "failed": 0}
+    counts = {"ok": 0, "empty": 0, "skipped": 0, "failed": 0, "no_versions_json": 0}
     failed: list[str] = []
 
     for i, arxiv_id in enumerate(ids, start=1):
         versions = read_versions(arxiv_id, args.versions)
         if not versions:
-            print(f"[{i}/{len(ids)}] {arxiv_id}: chưa có versions.json "
-                  f"và không có --versions -> bỏ qua")
+            counts["no_versions_json"] += 1  # thường là ID không tồn tại (nằm trong failed_ids.txt)
+            if counts["no_versions_json"] <= 20:
+                print(f"[{i}/{len(ids)}] {arxiv_id}: chưa có versions.json "
+                      f"và không có --versions -> bỏ qua")
             continue
         for v in versions:
             try:
