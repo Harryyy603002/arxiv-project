@@ -24,7 +24,7 @@ poster/
 
 # Bí mật: KHÔNG BAO GIỜ commit API key
 .env
-.env.*
+.env
 
 # Rác của Python
 __pycache__/
@@ -47,3 +47,4 @@ cache/
 .DS_Store
 Thumbs.db
 .vscode/
+.idea/
