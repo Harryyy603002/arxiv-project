@@ -205,3 +205,161 @@ def test_scan_counts_reasons(tmp_path, monkeypatch, capsys):
     assert out["n_versions"] == 3 and out["papers_without_source"] == 1
     assert out["counts"] == {"ok": 2, "no_tex_files": 1}
     assert "TỔNG KẾT" in capsys.readouterr().out
+
+
+# ============================================================================
+# Lệnh include: không nhận nhầm \includegraphics, \includeonly, \inputencoding
+# ============================================================================
+@pytest.mark.parametrize("src, expected", [
+    ("\\input{intro}", ["intro"]),
+    ("\\include{sec/a}", ["sec/a"]),
+    ("\\input intro", ["intro"]),
+    ("\\input{./sections/a.tex}", ["sections/a"]),
+    ("\\subfile{part1}", ["part1"]),
+    ("\\includegraphics[width=0.5\\textwidth]{fig1}", []),
+    ("\\includeonly{a,b}", []),
+    ("\\inputencoding{utf8}", []),
+    ("% \\input{hidden}\n\\input{shown}", ["shown"]),
+    ("\\begin{comment}\n\\input{hidden}\n\\end{comment}\n\\input{shown}", ["shown"]),
+])
+def test_find_include_targets(src, expected):
+    assert G.find_include_targets(src) == expected
+
+
+def test_figures_do_not_inflate_include_count(tmp_path):
+    # supp.tex có nhiều \includegraphics nhưng 0 lệnh include thật; main.tex có 1 \input thật
+    figs = "".join(f"\\includegraphics{{f{i}}}\n" for i in range(5))
+    write(tmp_path, {
+        "main.tex": "\\documentclass{article}\n\\begin{document}\n\\input{a}\n\\end{document}",
+        "supp.tex": "\\documentclass{article}\n\\begin{document}\n" + figs + "\\end{document}",
+        "a.tex": "A",
+    })
+    assert G.find_root_file(tmp_path).root == "main.tex"
+
+
+# ============================================================================
+# collect_compilation_files
+# ============================================================================
+def doc(body):
+    return "\\documentclass{article}\n\\begin{document}\n" + body + "\n\\end{document}\n"
+
+
+def test_collect_follows_nested_includes_in_order(tmp_path):
+    # mô phỏng bài 2512.23232: main -> sections -> figure, và phụ lục -> figure khác
+    write(tmp_path, {
+        "main.tex": doc("\\input{1_Intro}\n\\input{4_Exp}\n\\input{X_Appendix}"),
+        "1_Intro.tex": "Intro \\input{Figure_1}",
+        "4_Exp.tex": "\\input{Figure_3}\n\\input{main_table}",
+        "X_Appendix.tex": "\\input{Figure_5}\n\\input{appendix_ode}",
+        "Figure_1.tex": "f1", "Figure_3.tex": "f3", "Figure_5.tex": "f5",
+        "main_table.tex": "table", "appendix_ode.tex": "ode",
+    })
+    c = G.collect_compilation_files(tmp_path)
+    assert c.root == "main.tex"
+    assert c.files == ["main.tex", "1_Intro.tex", "Figure_1.tex", "4_Exp.tex", "Figure_3.tex",
+                       "main_table.tex", "X_Appendix.tex", "Figure_5.tex", "appendix_ode.tex"]
+    assert (c.unresolved, c.cycles, c.unused) == ([], [], [])
+    assert ("1_Intro.tex", "Figure_1.tex") in c.edges
+
+
+def test_collect_ignores_commented_and_comment_env_includes(tmp_path):
+    write(tmp_path, {
+        "main.tex": doc("% \\input{old}\n\\input{new}\n\\begin{comment}\n\\input{draft}\n\\end{comment}"),
+        "new.tex": "n", "old.tex": "o", "draft.tex": "d",
+    })
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["main.tex", "new.tex"]
+    assert sorted(c.unused) == ["draft.tex", "old.tex"]     # file thừa, không bị parse
+
+
+def test_collect_reports_unresolved_includes(tmp_path):
+    write(tmp_path, {"main.tex": doc("\\input{exists}\n\\input{plots/fig.tikz}\n\\input{missing}"),
+                     "exists.tex": "x"})
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["main.tex", "exists.tex"]
+    assert c.unresolved == [("main.tex", "plots/fig.tikz"), ("main.tex", "missing")]
+
+
+def test_collect_detects_cycles_without_infinite_loop(tmp_path):
+    write(tmp_path, {"main.tex": doc("\\input{a}"),
+                     "a.tex": "\\input{b}", "b.tex": "\\input{a}"})
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["main.tex", "a.tex", "b.tex"]
+    assert c.cycles == [("b.tex", "a.tex")]
+
+
+def test_collect_self_include_is_a_cycle(tmp_path):
+    write(tmp_path, {"main.tex": doc("\\input{main}")})
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["main.tex"] and c.cycles == [("main.tex", "main.tex")]
+
+
+def test_collect_file_included_twice_listed_once(tmp_path):
+    write(tmp_path, {"main.tex": doc("\\input{fig}\n\\input{fig}"), "fig.tex": "f"})
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["main.tex", "fig.tex"]
+    assert c.edges == [("main.tex", "fig.tex"), ("main.tex", "fig.tex")]   # nhưng cạnh ghi cả hai lần
+
+
+def test_collect_paths_relative_to_root_directory(tmp_path):
+    # LaTeX tính đường dẫn từ thư mục chạy (thư mục file gốc), kể cả khi \input nằm trong thư mục con
+    write(tmp_path, {
+        "main.tex": doc("\\input{sections/intro}"),
+        "sections/intro.tex": "\\input{sections/fig}",      # tính từ thư mục gốc
+        "sections/fig.tex": "f",
+    })
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["main.tex", "sections/intro.tex", "sections/fig.tex"]
+
+
+def test_collect_falls_back_to_including_file_directory(tmp_path):
+    write(tmp_path, {
+        "main.tex": doc("\\input{sections/intro}"),
+        "sections/intro.tex": "\\input{fig}",                # chỉ đúng nếu tính từ thư mục của intro.tex
+        "sections/fig.tex": "f",
+    })
+    assert G.collect_compilation_files(tmp_path).files[-1] == "sections/fig.tex"
+
+
+def test_collect_with_root_in_subdirectory(tmp_path):
+    write(tmp_path, {"paper/main.tex": doc("\\input{intro}"), "paper/intro.tex": "i"})
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["paper/main.tex", "paper/intro.tex"]
+
+
+def test_collect_with_explicit_root_and_explicit_extension(tmp_path):
+    write(tmp_path, {"a.tex": doc("\\input{b.tex}"), "b.tex": "b", "c.tex": doc("")})
+    c = G.collect_compilation_files(tmp_path, root="a.tex")
+    assert c.files == ["a.tex", "b.tex"] and c.unused == ["c.tex"]
+
+
+def test_collect_macro_targets_are_unresolved(tmp_path):
+    write(tmp_path, {"main.tex": doc("\\input{\\figdir/a}"), "a.tex": "x"})
+    c = G.collect_compilation_files(tmp_path)
+    assert c.files == ["main.tex"] and c.unresolved == [("main.tex", "\\figdir/a")]
+
+
+def test_collect_without_root_marks_everything_unused(tmp_path):
+    write(tmp_path, {"intro.tex": "just text", "b.tex": "more"})
+    c = G.collect_compilation_files(tmp_path)
+    assert c.root is None and c.files == [] and c.unused == ["b.tex", "intro.tex"]
+
+
+def test_collect_does_not_escape_version_directory(tmp_path):
+    write(tmp_path, {"main.tex": doc("\\input{../secret}"), "secret.tex": "s"})
+    c = G.collect_compilation_files(tmp_path / "")
+    assert c.files == ["main.tex"] and c.unresolved == [("main.tex", "../secret")]
+
+
+def test_scan_with_gather_reports_statistics(tmp_path, monkeypatch, capsys):
+    from utils import config as C
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
+    write(tmp_path, {
+        "2512-23232/v1/main.tex": doc("\\input{a}\n\\input{lost}"),
+        "2512-23232/v1/a.tex": "a",
+        "2512-23232/v1/unused.tex": "u",
+    })
+    out = G.scan(["2512.23232"], gather=True)
+    assert out["gather"]["versions"] == 1 and out["gather"]["files"] == 2
+    assert out["gather"]["with_unresolved"] == 1 and out["gather"]["with_unused"] == 1
+    assert "TỔNG KẾT GOM FILE" in capsys.readouterr().out
