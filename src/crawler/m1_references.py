@@ -9,6 +9,12 @@ Mục đích: Crawl reference từ Semantic Scholar, giữ reference có externa
 
 Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
 Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
+
+Chống rate limit (HTTP 429):
+  - Tôn trọng header Retry-After nếu server gửi.
+  - Giãn cách thích ứng: gặp 429 thì tăng khoảng cách giữa các request, thành công thì giảm dần.
+  - Ngắt mạch: nếu nhiều bài liên tiếp thất bại vì 429 thì nghỉ dài (COOLDOWN_SECONDS)
+    rồi mới thử tiếp, thay vì đốt thời gian cho từng bài.
 """
 
 from __future__ import annotations
@@ -28,10 +34,21 @@ from utils import config as C  # noqa: E402
 log = logging.getLogger("m1_references")
 
 REQUEST_TIMEOUT = 60
-MAX_RETRIES = 4
-BACKOFF_SECONDS = 10
+MAX_RETRIES = 5
+BACKOFF_SECONDS = 15
+MAX_BACKOFF_SECONDS = 120
 RETRY_STATUS = {429, 500, 502, 503, 504}
+
+# Giãn cách thích ứng
+MAX_EXTRA_DELAY = 30.0
+# Ngắt mạch
+BREAKER_THRESHOLD = 3        # số bài liên tiếp thất bại vì 429 thì nghỉ dài
+COOLDOWN_SECONDS = 300
+
 _last_request_time = 0.0
+_extra_delay = 0.0
+_consecutive_429_failures = 0
+_warned_no_key = False
 
 
 class ReferenceCrawlError(Exception):
@@ -39,10 +56,11 @@ class ReferenceCrawlError(Exception):
 
 
 def polite_wait() -> None:
-    """Keep requests at least C.S2_DELAY_SECONDS apart."""
+    """Keep requests at least C.S2_DELAY_SECONDS (+ giãn cách thích ứng) apart."""
+    gap = C.S2_DELAY_SECONDS + _extra_delay
     elapsed = time.monotonic() - _last_request_time
-    if elapsed < C.S2_DELAY_SECONDS:
-        time.sleep(C.S2_DELAY_SECONDS - elapsed)
+    if elapsed < gap:
+        time.sleep(gap - elapsed)
 
 
 def _touch() -> None:
@@ -50,16 +68,72 @@ def _touch() -> None:
     _last_request_time = time.monotonic()
 
 
+def _on_rate_limited() -> None:
+    global _extra_delay
+    _extra_delay = min(MAX_EXTRA_DELAY, max(2.0, _extra_delay * 2))
+
+
+def _on_success() -> None:
+    global _extra_delay, _consecutive_429_failures
+    _extra_delay = _extra_delay * 0.8 if _extra_delay > 0.5 else 0.0
+    _consecutive_429_failures = 0
+
+
+def _retry_after_seconds(response: requests.Response) -> float | None:
+    """Đọc Retry-After (dạng số giây). Bỏ qua nếu không có/không phải số."""
+    value = response.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
+def _warn_if_no_api_key() -> None:
+    global _warned_no_key
+    if _warned_no_key:
+        return
+    _warned_no_key = True
+    try:
+        headers = {k.lower() for k in (C.s2_headers() or {})}
+    except Exception:  # noqa: BLE001
+        headers = set()
+    if "x-api-key" not in headers:
+        log.warning(
+            "Không thấy x-api-key trong C.s2_headers(): đang dùng pool chung của Semantic Scholar, "
+            "rất dễ bị 429. Hãy đặt API key (xem utils/config.py)."
+        )
+
+
+def _circuit_breaker() -> None:
+    """Nếu nhiều bài liên tiếp thất bại vì 429 thì nghỉ dài trước khi thử bài tiếp theo."""
+    global _consecutive_429_failures
+    if _consecutive_429_failures >= BREAKER_THRESHOLD:
+        log.warning(
+            "%d bài liên tiếp bị 429 - nghỉ %ds rồi thử tiếp",
+            _consecutive_429_failures, COOLDOWN_SECONDS,
+        )
+        time.sleep(COOLDOWN_SECONDS)
+        _consecutive_429_failures = 0
+
+
 def fetch_references(session: requests.Session, arxiv_id: str,
                      attempts: int = MAX_RETRIES) -> list[dict]:
     """Fetch all references, retaining non-arXiv references for later filtering."""
+    global _consecutive_429_failures
+    _warn_if_no_api_key()
+    _circuit_breaker()
+
     base_id = C.split_version(arxiv_id)[0]
     url = C.S2_API_URL.format(arxiv_id=base_id)
     params = {"fields": C.S2_REF_FIELDS, "limit": 1000}
     last_problem = "unknown error"
+    rate_limited = False
 
     for attempt in range(1, attempts + 1):
         polite_wait()
+        retry_after: float | None = None
         try:
             response = session.get(
                 url, headers=C.s2_headers(), params=params, timeout=REQUEST_TIMEOUT
@@ -77,17 +151,26 @@ def fetch_references(session: requests.Session, arxiv_id: str,
                 references = payload.get("references")
                 if not isinstance(references, list):
                     raise ReferenceCrawlError(f"{base_id}: response has no references list")
+                _on_success()
                 return references
 
             last_problem = f"HTTP {response.status_code}"
+            if response.status_code == 429:
+                rate_limited = True
+                _on_rate_limited()
+                retry_after = _retry_after_seconds(response)
             if response.status_code not in RETRY_STATUS:
                 break
 
         if attempt < attempts:
-            wait = BACKOFF_SECONDS * (2 ** (attempt - 1))
-            log.warning("%s - retrying in %ss (%d/%d)", last_problem, wait, attempt, attempts)
+            wait = min(MAX_BACKOFF_SECONDS, BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            if retry_after is not None:
+                wait = max(wait, retry_after)
+            log.warning("%s - retrying in %ss (%d/%d)", last_problem, int(wait), attempt, attempts)
             time.sleep(wait)
 
+    if rate_limited:
+        _consecutive_429_failures += 1
     raise ReferenceCrawlError(f"{base_id}: {last_problem}")
 
 
