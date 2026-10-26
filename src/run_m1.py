@@ -59,6 +59,8 @@ def download_sources(ids: List[str], perf: PerfRecorder, force: bool = False) ->
     session.headers.update({"User-Agent": m1_download.USER_AGENT})
 
     for i, raw_id in enumerate(ids, start=1):
+        if i == 1 or i % 100 == 0:
+            log.info("download: %d/%d", i, len(ids))
         aid = C.split_version(raw_id)[0]
         if not C.meta_path(aid).exists():
             continue
@@ -143,7 +145,11 @@ def build_references_table() -> int:
     import pandas as pd
 
     rows = []
-    for ref_file in sorted(C.DATA_DIR.glob("*/refs.json")):
+    files = sorted(C.DATA_DIR.glob("*/refs.json"))
+    log.info("build_references_table: %d file refs.json", len(files))
+    for n, ref_file in enumerate(files, start=1):
+        if n % 500 == 0:
+            log.info("  đọc refs %d/%d", n, len(files))
         try:
             payload = json.loads(ref_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -196,7 +202,9 @@ def crawl_references(ids: List[str], perf: PerfRecorder, force: bool = False) ->
     """Crawl reference qua Semantic Scholar, mỗi bài bọc trong `with perf.paper(aid):`."""
     session = requests.Session()
 
-    for raw_id in ids:
+    for i, raw_id in enumerate(ids, start=1):
+        if i == 1 or i % 100 == 0:
+            log.info("references: %d/%d", i, len(ids))
         aid = C.split_version(raw_id)[0]
         if not C.meta_path(aid).exists():
             continue
@@ -249,11 +257,13 @@ def main(argv=None) -> None:
 
     C.ensure_dir(C.DATA_DIR)
     out = args.out or str(C.DATA_DIR / "benchmark_m1.json")
+    log.info("Bắt đầu: %d id, DATA_DIR=%s", len(ids), C.DATA_DIR)
 
     with PerfRecorder("m1", watch_dirs=[C.DATA_DIR]) as perf:
         with perf.stage("discovery"):
             m1_metadata.crawl(ids, args.batch_size, args.force)
             m1_metadata.build_papers_table()
+        log.info("discovery xong (%.1fs)", perf.stage_times["discovery"])
         per_paper = perf.stage_times["discovery"] / max(len(ids), 1)
         for aid in ids:
             base_id = C.split_version(aid)[0]
@@ -261,11 +271,15 @@ def main(argv=None) -> None:
 
         with perf.stage("download"):
             download_sources(ids, perf, force=args.force)
+        log.info("download xong (%.1fs)", perf.stage_times["download"])
 
         with perf.stage("references"):
             crawl_references(ids, perf, force=args.force)
+        log.info("references xong (%.1fs)", perf.stage_times["references"])
 
-        for aid in ids:
+        for k, aid in enumerate(ids, start=1):
+            if k % 500 == 0:
+                log.info("kiểm tra kết quả: %d/%d", k, len(ids))
             base_id = C.split_version(aid)[0]
             ok = C.meta_path(base_id).exists()
             if ok:
@@ -284,6 +298,7 @@ def main(argv=None) -> None:
         summary.get("success_rate"),
         summary.get("ref_success_rate"),
     )
+
 
 if __name__ == "__main__":
     main()

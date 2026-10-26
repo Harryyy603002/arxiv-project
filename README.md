@@ -200,6 +200,7 @@ Sau khi lấy metadata, chạy tiếp tải source và crawl reference cho cùng
 ```bash
 python src/crawler/m1_source.py --range <khoảng_ID>
 python src/crawler/m1_references.py --range <khoảng_ID>
+python src/crawler/m1_references_batch.py --range <khoảng_ID> --batch-size 25
 ```
 
 Một số ID trong khoảng có thể không tồn tại (bị rút/gộp). Chúng được ghi vào `data/failed_ids.txt` và không phải lỗi.
