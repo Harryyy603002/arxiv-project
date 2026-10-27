@@ -5,28 +5,48 @@ Pipeline: M1 Crawling → M2 Parsing → M3 Matching.
 - Báo cáo (Jupyter Book): <link GitHub Pages>
 - Dataset (Hugging Face): <link dataset>
 
-## 1. Chạy code
-
-Mở Google Colab, tạo notebook mới và chạy:
-
-```python
-!git clone https://github.com/Harryyy603002/arxiv-project.git
-%cd arxiv-project
-
-# (tùy chọn) gắn Google Drive để lưu/đọc data/ dùng chung
-from google.colab import drive
-drive.mount('/content/drive')
-```
-
-## 2. Cài đặt môi trường
+## 1. Chuẩn bị môi trường
 
 Yêu cầu: Python 3.10 trở lên.
 
-```bash
-pip install -r src/requirements.txt
-```
+### Google Colab
 
-Chạy trên máy cá nhân thì tạo môi trường ảo trước:
+Tạo notebook mới. Chạy các cell theo thứ tự:
+
+1. Clone repo và cài dependencies:
+
+  ```python
+  !git clone https://github.com/Harryyy603002/arxiv-project.git
+  %cd arxiv-project
+  !pip install -r src/requirements.txt
+  ```
+
+1. Thêm API key vào Colab Secrets: mở bảng **Secrets** (biểu tượng chìa khóa), tạo secret tên `S2_API_KEY`, rồi bật quyền truy cập cho notebook. Trước khi chạy M1, chạy cell:
+
+  ```python
+  import os
+  from google.colab import userdata
+
+  os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
+  ```
+
+  Key này dùng cho Semantic Scholar references; không cần cho bước metadata hoặc tải source.
+
+1. (Tùy chọn) Gắn Google Drive nếu muốn lưu dữ liệu ở đó:
+
+  ```python
+  import os
+  from google.colab import drive
+
+  drive.mount("/content/drive")
+  os.environ["ARXIV_DATA_DIR"] = "/content/drive/MyDrive/arxiv-data"
+  ```
+
+  Đặt `ARXIV_DATA_DIR` trước khi chạy pipeline.
+
+### Máy cá nhân
+
+Tạo môi trường ảo, sau đó cài dependencies:
 
 ```bash
 python -m venv .venv
@@ -35,20 +55,7 @@ python -m venv .venv
 pip install -r src/requirements.txt
 ```
 
-**Cấu hình biến môi trường (tuyệt đối không commit API key):**
-
-- Máy cá nhân: đặt biến môi trường hoặc tạo file `.env` (đã bị `.gitignore`):
-  - `S2_API_KEY`: API key của Semantic Scholar (dùng cho crawler reference).
-  - `CONTACT_EMAIL`: Email liên hệ gắn vào header `User-Agent` khi tải source từ arXiv.
-
-- Colab: mở bảng *Secrets* (biểu tượng chìa khóa), thêm secret tên S2_API_KEY và bật quyền truy cập cho notebook. Chạy cell sau trước khi chạy pipeline để biến môi trường được truyền cho các tiến trình Python:
-
-  import os
-  from google.colab import userdata
-
-  os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
-
-Tên biến phải khớp với cái `src/utils/config.py` đọc.
+Đặt `S2_API_KEY` (khuyến nghị cho Semantic Scholar) và `CONTACT_EMAIL` (User-Agent tải source) qua biến môi trường hoặc file `.env` đã bị `.gitignore`. Tuyệt đối không commit API key. Tên biến được đọc trong `src/utils/config.py`.
 
 ## 3. Dữ liệu KHÔNG nằm trong repo
 
@@ -177,37 +184,48 @@ Muốn đổi định dạng của dòng nào: báo cả nhóm và cập nhật 
 
 ## 7. Chạy pipeline
 
-Chạy từ thư mục gốc của repo:
+Chạy lệnh từ thư mục repo. Thay khoảng mẫu bằng khoảng ID được giao bên dưới.
 
-```bash
-python src/run_m1.py --range XXXX.XXXXX-XXXX.XXXXX  # thay bằng khoảng ID của mình (xem bảng dưới)
-python src/run_m2.py
-python src/run_m3.py
-```
-```
+1. Chạy thử 5 bài trước:
 
-Khoảng arXiv ID được phân công (mỗi người 5.000 ID trên máy riêng, tổng 20.000 bài, rồi gộp dữ liệu qua Drive chung):
+  ```bash
+  python src/run_m1.py --range 2606.20734-2606.25733 --limit 5
+  ```
 
-| Người | Khoảng ID | Lệnh lấy metadata |
+1. Nếu các file trong `data/` được tạo đúng, chạy toàn bộ khoảng:
+
+  ```bash
+  python src/run_m1.py --range 2606.20734-2606.25733
+  ```
+
+`run_m1.py` chạy metadata, tải source và references. Reference requests dùng endpoint batch của Semantic Scholar, mặc định 25 bài/request. Có thể đổi bằng `--references-batch-size` (tối đa 500; response tối đa 10 MB). `--batch-size` điều chỉnh riêng batch metadata arXiv. Các file đã hoàn tất được cache trong `data/`, nên chạy lại sẽ tiếp tục phần còn thiếu. Đặt `S2_API_KEY` trước khi chạy để tránh giới hạn rate của request không xác thực.
+
+1. Sau khi nhóm hoàn tất và gộp dữ liệu M1, chạy các milestone tiếp theo:
+
+  ```bash
+  python src/run_m2.py
+  python src/run_m3.py
+  ```
+
+### Khoảng ID được phân công
+
+Mỗi thành viên chạy khoảng 5.000 ID riêng; sau đó dữ liệu được gộp qua Drive chung.
+
+| Người | Khoảng ID | Lệnh M1 đầy đủ |
 | --- | --- | --- |
-| Quoc | 2512.23231 → 2601.03155 | `python src/crawler/m1_metadata.py --range 2512.23231-2601.03155 --month-last 2512=<ID cuối tháng 12/2025>` |
-| Nguyen | 2602.04870 → 2602.09869 | `python src/crawler/m1_metadata.py --range 2602.04870-2602.09869` |
-| Khai | 2603.00580 → 2603.05579 | `python src/crawler/m1_metadata.py --range 2603.00580-2603.05579` |
-| Tri | 2606.20734 → 2606.25733 | `python src/crawler/m1_metadata.py --range 2606.20734-2606.25733` |
+| Quoc | 2512.23231 → 2601.03155 | `python src/run_m1.py --range 2512.23231-2601.03155 --month-last 2512=<ID cuối tháng 12/2025>` |
+| Nguyen | 2602.04870 → 2602.09869 | `python src/run_m1.py --range 2602.04870-2602.09869` |
+| Khai | 2603.00580 → 2603.05579 | `python src/run_m1.py --range 2603.00580-2603.05579` |
+| Tri | 2606.20734 → 2606.25733 | `python src/run_m1.py --range 2606.20734-2606.25733` |
 
-Sau khi lấy metadata, chạy tiếp tải source và crawl reference cho cùng khoảng ID (thêm `--limit 5` nếu muốn chạy thử):
-
-```bash
-python src/crawler/m1_source.py --range <khoảng_ID>
-python src/crawler/m1_references.py --range <khoảng_ID>
-python src/crawler/m1_references_batch.py --range <khoảng_ID> --batch-size 25
-```
+Một số ID có thể không tồn tại (bị rút/gộp); crawler ghi nhận chúng là ID thất bại và tiếp tục.
 
 Một số ID trong khoảng có thể không tồn tại (bị rút/gộp). Chúng được ghi vào `data/failed_ids.txt` và không phải lỗi.
 
-Kiểm thử: `pytest src/tests` (đã có `pytest.ini` đặt `pythonpath = src`).
+Kiểm thử: `pytest src/tests` (đã có `pytest.ini` đặt `pythonpath = src`). `test_m1_references.py` kiểm tra batch request, cache khi chạy lại và chia nhóm khi API từ chối request quá lớn.
 
 ### Đo hiệu năng
+
 Đo trên Colab (CPU), với thư mục `data/` trống, chạy bằng `python src/run_m1.py ...`.
 Kết quả nằm ở `data/benchmark_m1.json`. Chỉ số: thời gian từng giai đoạn, RAM tối đa/trung bình,
 đĩa tối đa, dung lượng đầu ra. Có thể đo end-to-end bên ngoài bằng

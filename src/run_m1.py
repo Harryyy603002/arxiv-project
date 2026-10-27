@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import List, Tuple
 
@@ -198,38 +199,62 @@ def build_references_table() -> int:
     return len(df)
 
 
-def crawl_references(ids: List[str], perf: PerfRecorder, force: bool = False) -> None:
-    """Crawl reference qua Semantic Scholar, mỗi bài bọc trong `with perf.paper(aid):`."""
+def crawl_references(ids: List[str], perf: PerfRecorder, force: bool = False,
+                     batch_size: int = m1_references.DEFAULT_BATCH_SIZE) -> None:
+    """Fetch references in API batches and record per-paper benchmark statistics."""
     session = requests.Session()
+    pending = []
+    seen = set()
 
-    for i, raw_id in enumerate(ids, start=1):
-        if i == 1 or i % 100 == 0:
-            log.info("references: %d/%d", i, len(ids))
+    for raw_id in ids:
         aid = C.split_version(raw_id)[0]
-        if not C.meta_path(aid).exists():
+        if not C.meta_path(aid).exists() or aid in seen:
             continue
+        seen.add(aid)
 
         ref_path = C.refs_path(aid)
-        with perf.paper(aid):
-            if not force and ref_path.exists():
-                try:
-                    data = json.loads(ref_path.read_text(encoding="utf-8"))
-                    refs = data.get("references") or []
-                    total, with_arxiv = _count_refs(refs)
-                    perf.record_references(aid, True, total_refs=total, arxiv_refs=with_arxiv)
-                    continue
-                except (OSError, ValueError):
-                    pass
-
+        if not force and ref_path.exists():
+            started = time.perf_counter()
             try:
-                refs = m1_references.fetch_references(session, aid)
+                data = json.loads(ref_path.read_text(encoding="utf-8"))
+                refs = data.get("references") or []
+                if not isinstance(refs, list):
+                    raise ValueError("references must be a list")
+                total, with_arxiv = _count_refs(refs)
+                perf.record_references(aid, True, total_refs=total, arxiv_refs=with_arxiv)
+                perf.add_paper_time(aid, time.perf_counter() - started)
+                continue
+            except (OSError, ValueError):
+                perf.add_paper_time(aid, time.perf_counter() - started)
+        pending.append(aid)
+
+    log.info("references: %d papers to fetch in batches of %d", len(pending), batch_size)
+    for offset in range(0, len(pending), batch_size):
+        group = pending[offset:offset + batch_size]
+        started = time.perf_counter()
+        try:
+            papers = m1_references.fetch_batch_group(session, group)
+        except m1_references.ReferenceCrawlError as err:
+            log.error("reference batch %d-%d failed: %s", offset + 1, offset + len(group), err)
+            for aid in group:
+                perf.add_paper_time(aid, (time.perf_counter() - started) / len(group))
+                perf.record_references(aid, False)
+            continue
+
+        seconds_per_paper = (time.perf_counter() - started) / len(group)
+        for aid, paper in zip(group, papers):
+            perf.add_paper_time(aid, seconds_per_paper)
+            with perf.paper(aid):
+                refs = paper.get("references") if isinstance(paper, dict) else None
+                if not isinstance(refs, list):
+                    perf.record_references(aid, False)
+                    log.warning("%s: Semantic Scholar returned no references", aid)
+                    continue
+                ref_path = C.refs_path(aid)
                 m1_references.write_refs(aid, refs)
                 total, with_arxiv = _count_refs(refs)
                 perf.record_references(aid, True, total_refs=total, arxiv_refs=with_arxiv)
                 log.info("saved %s (total=%d, arxiv=%d)", ref_path, total, with_arxiv)
-            except m1_references.ReferenceCrawlError as err:
-                perf.record_references(aid, False)
-                log.error("%s", err)
 
     build_references_table()
 
@@ -241,6 +266,8 @@ def main(argv=None) -> None:
     ap.add_argument("--ids", nargs="*")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--batch-size", type=int, default=C.ARXIV_API_BATCH)
+    ap.add_argument("--references-batch-size", type=int, default=m1_references.DEFAULT_BATCH_SIZE,
+                    help="papers per Semantic Scholar batch request")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--out", default=None, help="mặc định: data/benchmark_m1.json")
     args = ap.parse_args(argv)
@@ -254,6 +281,8 @@ def main(argv=None) -> None:
         ap.error("cần --range hoặc --ids")
     if args.limit:
         ids = ids[:args.limit]
+    if not 1 <= args.references_batch_size <= m1_references.MAX_BATCH_SIZE:
+        ap.error(f"--references-batch-size must be between 1 and {m1_references.MAX_BATCH_SIZE}")
 
     C.ensure_dir(C.DATA_DIR)
     out = args.out or str(C.DATA_DIR / "benchmark_m1.json")
@@ -274,7 +303,7 @@ def main(argv=None) -> None:
         log.info("download xong (%.1fs)", perf.stage_times["download"])
 
         with perf.stage("references"):
-            crawl_references(ids, perf, force=args.force)
+            crawl_references(ids, perf, force=args.force, batch_size=args.references_batch_size)
         log.info("references xong (%.1fs)", perf.stage_times["references"])
 
         for k, aid in enumerate(ids, start=1):
