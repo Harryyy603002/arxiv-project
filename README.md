@@ -5,28 +5,48 @@ Pipeline: M1 Crawling → M2 Parsing → M3 Matching.
 - Báo cáo (Jupyter Book): <link GitHub Pages>
 - Dataset (Hugging Face): <link dataset>
 
-## 1. Chạy code
-
-Mở Google Colab, tạo notebook mới và chạy:
-
-```python
-!git clone https://github.com/Harryyy603002/arxiv-project.git
-%cd arxiv-project
-
-# (tùy chọn) gắn Google Drive để lưu/đọc data/ dùng chung
-from google.colab import drive
-drive.mount('/content/drive')
-```
-
-## 2. Cài đặt môi trường
+## 1. Chuẩn bị môi trường
 
 Yêu cầu: Python 3.10 trở lên.
 
-```bash
-pip install -r src/requirements.txt
-```
+### Google Colab
 
-Chạy trên máy cá nhân thì tạo môi trường ảo trước:
+Tạo notebook mới. Chạy các cell theo thứ tự:
+
+1. Clone repo và cài dependencies:
+
+  ```python
+  !git clone https://github.com/Harryyy603002/arxiv-project.git
+  %cd arxiv-project
+  !pip install -r src/requirements.txt
+  ```
+
+1. Thêm API key vào Colab Secrets: mở bảng **Secrets** (biểu tượng chìa khóa), tạo secret tên `S2_API_KEY`, rồi bật quyền truy cập cho notebook. Trước khi chạy M1, chạy cell:
+
+  ```python
+  import os
+  from google.colab import userdata
+
+  os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
+  ```
+
+  Key này dùng cho Semantic Scholar references; không cần cho bước metadata hoặc tải source.
+
+1. (Tùy chọn) Gắn Google Drive nếu muốn lưu dữ liệu ở đó:
+
+  ```python
+  import os
+  from google.colab import drive
+
+  drive.mount("/content/drive")
+  os.environ["ARXIV_DATA_DIR"] = "/content/drive/MyDrive/arxiv-data"
+  ```
+
+  Đặt `ARXIV_DATA_DIR` trước khi chạy pipeline.
+
+### Máy cá nhân
+
+Tạo môi trường ảo, sau đó cài dependencies:
 
 ```bash
 python -m venv .venv
@@ -35,26 +55,13 @@ python -m venv .venv
 pip install -r src/requirements.txt
 ```
 
-**Cấu hình biến môi trường (tuyệt đối không commit API key):**
-
-- Máy cá nhân: đặt biến môi trường hoặc tạo file `.env` (đã bị `.gitignore`):
-  - `S2_API_KEY`: API key của Semantic Scholar (dùng cho crawler reference).
-  - `CONTACT_EMAIL`: Email liên hệ gắn vào header `User-Agent` khi tải source từ arXiv.
-
-- Colab: mở bảng *Secrets* (biểu tượng chìa khóa), thêm secret tên S2_API_KEY và bật quyền truy cập cho notebook. Chạy cell sau trước khi chạy pipeline để biến môi trường được truyền cho các tiến trình Python:
-
-  import os
-  from google.colab import userdata
-
-  os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
-
-Tên biến phải khớp với cái `src/utils/config.py` đọc.
+Đặt `S2_API_KEY` (khuyến nghị cho Semantic Scholar) và `CONTACT_EMAIL` (User-Agent tải source) qua biến môi trường hoặc file `.env` đã bị `.gitignore`. Tuyệt đối không commit API key. Tên biến được đọc trong `src/utils/config.py`.
 
 ## 3. Dữ liệu KHÔNG nằm trong repo
 
 Thư mục `data/` chỉ tồn tại trên máy hoặc Colab của mỗi người (đã bị `.gitignore`). Đề cấm commit dữ liệu, kể cả CSV nhãn.
 
-Dữ liệu dùng chung được chia sẻ qua: <link Google Drive>. Mỗi người upload thư mục `data/` của khoảng ID mình phụ trách, giữ nguyên tên `<paper_key>`.
+Dữ liệu dùng chung được chia sẻ qua: <link Google Drive>. Mỗi người upload thư mục `corpus/` của khoảng ID mình phụ trách, giữ nguyên tên `<paper_key>`.
 
 ## 4. Thỏa thuận giao diện dữ liệu (không commit)
 
@@ -62,7 +69,7 @@ Dữ liệu dùng chung được chia sẻ qua: <link Google Drive>. Mỗi ngư�
 
 Luôn dùng các hàm trong `src/utils/config.py` để tạo đường dẫn.
 
-### Cấu trúc thư mục
+### Cấu trúc thư mục (Output M1 nằm trong `corpus`)
 
 ```text
 data/
@@ -73,20 +80,18 @@ data/
 ├── labels/
 │   ├── manual_labels.csv
 │   └── auto_labels.csv
-└── <paper_key>/
-    ├── versions.json                   # danh sách version
-    ├── meta.json                       # metadata bài báo
-    ├── refs.json                       # reference từ Semantic Scholar (cấp bài)
-    ├── bibtex_merged.json              # BibTeX đã gộp xuyên version
-    ├── elements.json                   # các phần tử đã làm sạch, loại trùng
-    ├── hierarchy.json                  # cạnh nút–cha của từng version
-    └── vN/
-        ├── *.tex, *.bib                # không có .tex = bản rỗng (PDF-only)
-        ├── source_status.json          # trạng thái tải + dung lượng trước/sau lọc hình
-        └── tree_raw.json               # cây thô, text chưa làm sạch
+└── corpus/
+    └── <paper_key>/
+        ├── paper.json                  # metadata của toàn bài báo
+        ├── bibtex_merged.json          # BibTeX đã gộp xuyên version (Phục vụ M2/M3)
+        ├── elements.json               # các phần tử đã làm sạch, loại trùng (Phục vụ M2/M3)
+        ├── hierarchy.json              # cạnh nút–cha của từng version (Phục vụ M2/M3)
+        └── vN/
+            ├── *.tex, *.bib            # không có .tex = bản rỗng (PDF-only)
+            ├── metadata.json           # metadata của version, trạng thái, dung lượng M1
+            ├── references.json         # TOÀN BỘ reference crawl từ Semantic Scholar
+            └── tree_raw.json           # cây thô, text chưa làm sạch (Phục vụ M2/M3)
 ```
-
-`refs.json` đặt ở cấp bài thay vì trong `vN/` vì Semantic Scholar trả reference theo bài, không phân biệt version, nên để trong từng `vN/` chỉ là chép lặp.
 
 Version chỉ có PDF vẫn phải có thư mục `vN/` (rỗng). M2 coi đó là bản rỗng và tính vào thống kê, không được bỏ qua.
 
@@ -94,45 +99,42 @@ Version chỉ có PDF vẫn phải có thư mục `vN/` (rỗng). M2 coi đó l�
 
 | # | Từ → Đến | File | Ghi chú |
 | --- | --- | --- | --- |
-| 1 | Nguyen → Quoc | `<paper_key>/versions.json` | Quoc lặp qua `versions[i]["version"]` để tạo `vN/` và tải source |
-| 2 | Nguyen → cả nhóm | `<paper_key>/meta.json`, `papers.csv`, `papers.parquet` | Metadata từng bài và bảng `papers` gộp |
-| 3 | Tri → cả nhóm | `<paper_key>/refs.json` | Mọi reference crawl được, kể cả không có arXiv ID. Chỉ cái có `externalIds.ArXiv` vào bảng `references` |
+| 1 | M1 Crawler → Cả nhóm | `<paper_key>/paper.json` | Chứa metadata cấp bài báo (`title`, `authors`, `n_versions`, `submission_date`...) |
+| 2 | M1 Crawler → Cả nhóm | `<paper_key>/vN/metadata.json` | Chứa metadata chi tiết cho từng version và thông tin đo lường dung lượng (`bytes_before`, `bytes_after`) |
+| 3 | M1 Crawler → Cả nhóm | `<paper_key>/vN/references.json` | Mọi reference crawl được từ Semantic Scholar theo dạng list. |
 | 4 | Quoc → Nguyen | `<paper_key>/vN/tree_raw.json` | Cây thô, text chưa làm sạch (cấu trúc bên dưới) |
 | 5 | Tri → Khai | `<paper_key>/bibtex_merged.json` | Đúng cột bảng `bibtex`: `arxiv_id, citation_key, entry_type, title, authors, year, doi, journal, url` |
 | 6 | Nguyen → Khai | `<paper_key>/elements.json`, `hierarchy.json` | Đúng cột bảng `elements` (`element_id, arxiv_id, kind, content`) và `hierarchy` (`arxiv_id, version, element_id, parent_id`) |
 | 7 | Cả nhóm | `labels/manual_labels.csv`, `auto_labels.csv` | Cột: `arxiv_id,citation_key,groundtruth_arxiv_id` (để trống nếu không có đáp án) |
-| 8 | P1 → cả nhóm | `data/<paper_key>/vN/source_status.json` | Trạng thái tải của từng version: `ok` hoặc `empty` kèm lý do |
 
 Hai lưu ý chéo giữa các mảng:
 
 - Nội dung câu trong `elements` phải **giữ nguyên lệnh `\cite{...}`**, vì Quoc dùng chúng để tính feature ngữ cảnh ở M3.
 - Việc đổi tên `\cite` theo khóa đã gộp phải xong **trước** khi loại trùng nội dung, vì khác khóa thì hai câu không còn giống nhau.
 
-### Ví dụ `versions.json`
+### Ví dụ `paper.json` (Đầu ra M1 cấp bài báo)
 
 ```json
 {
   "arxiv_id": "2310.12345",
-  "latest_version": 4,
-  "versions": [
-    {"version": "v1", "id_with_version": "2310.12345v1", "date": "2023-10-18T10:00:00+00:00"},
-    {"version": "v2", "id_with_version": "2310.12345v2", "date": null},
-    {"version": "v3", "id_with_version": "2310.12345v3", "date": null},
-    {"version": "v4", "id_with_version": "2310.12345v4", "date": "2024-01-05T08:30:00+00:00"}
-  ]
+  "title": "Example Paper Title",
+  "authors": ["Author A", "Author B"],
+  "submission_date": "2023-10-18T10:00:00+00:00",
+  "revised_dates": ["2024-01-05T08:30:00+00:00"],
+  "venue": "Conference Journal",
+  "n_versions": 2
 }
 ```
 
-`date`: arXiv API chỉ cung cấp ngày của v1 và của version mới nhất, các version ở giữa để `null`.
+### Các trường của Dữ liệu M1 và quy ước bảng
 
-### Các trường của `meta.json`, `refs.json` và quy ước bảng M1
+- **`paper.json` (cấp bài):** `arxiv_id, title, authors, submission_date, revised_dates, venue, n_versions`.
+- **`metadata.json` (trong từng `vN/`):** `arxiv_id, version, date, title, authors, venue, source_kind, archive_bytes, bytes_before, bytes_after`. Dùng để phục vụ thống kê báo cáo M1.
+- **`references.json` (trong từng `vN/`):** `ref_s2_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_venue, external_ids`.
+- **Bảng `papers` (xuất Parquet/CSV theo chuẩn đề):** Tập hợp từ các file `paper.json`.
+- **Bảng `references` (xuất Parquet/CSV theo chuẩn đề):** Tập hợp từ các file `references.json`, nhưng CHỈ giữ lại các ref có `ref_arxiv_id`.
 
-- **`meta.json` (lưu cục bộ):** `arxiv_id, title, authors, abstract, submission_date, revised_dates, latest_update, latest_version, primary_category, categories, journal_ref, doi, comment`
-- **Bảng `papers` (xuất Parquet/CSV theo đúng chuẩn đề):** `arxiv_id, title, authors, submission_date, revised_dates, venue` (lấy từ `journal_ref`).
-- **`source_status.json` (trong từng `vN/`):** lưu `status` (`ok` / `empty`), `reason`, `raw_bytes` (dung lượng `.tar.gz` gốc trước khi bỏ hình) và `extracted_bytes` (dung lượng `.tex` + `.bib` sau khi lọc) để phục vụ thống kê báo cáo M1.
-- **Bảng `references` (lọc từ `refs.json` các mục có `externalIds.ArXiv`):** `arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id`.
-
-### Cấu trúc `tree_raw.json` (đề xuất, chốt với cả nhóm)
+### Cấu trúc `tree_raw.json` (đề xuất, chốt với cả nhóm phục vụ M2)
 
 ```json
 {
@@ -177,41 +179,48 @@ Muốn đổi định dạng của dòng nào: báo cả nhóm và cập nhật 
 
 ## 7. Chạy pipeline
 
-Chạy từ thư mục gốc của repo:
+Chạy lệnh từ thư mục repo. Cần chuẩn bị trước một file văn bản (VD: `ids.txt`) chứa danh sách các arXiv ID (mỗi dòng 1 ID).
 
-```bash
-python src/run_m1.py --range XXXX.XXXXX-XXXX.XXXXX  # thay bằng khoảng ID của mình (xem bảng dưới)
-python src/run_m2.py
-python src/run_m3.py
-```
-```
+1. Chạy thử M1 (bằng cách để vài ID vào file `test_ids.txt`):
 
-Khoảng arXiv ID được phân công (mỗi người 5.000 ID trên máy riêng, tổng 20.000 bài, rồi gộp dữ liệu qua Drive chung):
+  ```bash
+  python src/run_m1.py --ids-file test_ids.txt --corpus-dir data/corpus
+  ```
 
-| Người | Khoảng ID | Lệnh lấy metadata |
+1. Chạy toàn bộ kho dữ liệu thực tế (bằng file danh sách thực sự của bạn):
+
+  ```bash
+  python src/run_m1.py --ids-file my_full_ids.txt --corpus-dir data/corpus
+  ```
+
+`run_m1.py` xử lý đồng bộ việc lấy metadata, tải source và lấy references theo từng cụm (batch). Việc gọi API lấy reference Semantic Scholar sử dụng endpoint batch (mặc định 25 bài/nhịp) để tối ưu hóa và chống Rate Limit. Bạn có thể điều chỉnh số lượng này thông qua cờ `--batch-size`. Đặt `S2_API_KEY` trước khi chạy để tránh giới hạn lượng request của các IP chưa xác thực.
+
+1. Sau khi nhóm hoàn tất và gộp dữ liệu M1, chạy các milestone tiếp theo:
+
+  ```bash
+  python src/run_m2.py
+  python src/run_m3.py
+  ```
+
+### Khoảng ID được phân công (Dữ liệu chạy thực tế)
+
+Mỗi thành viên chạy khoảng 5.000 ID riêng; sau đó dữ liệu (nằm trong thư mục `corpus/`) được gộp qua Drive chung. Bạn cần tạo một script nhỏ hoặc dùng tools để sinh ra file danh sách text `my_ids.txt` cho dải ID được giao trước khi đưa vào lệnh chạy.
+
+| Người | Khoảng ID | Lệnh M1 đầy đủ (Giả định file danh sách là `my_ids.txt`) |
 | --- | --- | --- |
-| Quoc | 2512.23231 → 2601.03155 | `python src/crawler/m1_metadata.py --range 2512.23231-2601.03155 --month-last 2512=<ID cuối tháng 12/2025>` |
-| Nguyen | 2602.04870 → 2602.09869 | `python src/crawler/m1_metadata.py --range 2602.04870-2602.09869` |
-| Khai | 2603.00580 → 2603.05579 | `python src/crawler/m1_metadata.py --range 2603.00580-2603.05579` |
-| Tri | 2606.20734 → 2606.25733 | `python src/crawler/m1_metadata.py --range 2606.20734-2606.25733` |
+| Quoc | 2512.23231 → 2601.03155 | `python src/run_m1.py --ids-file quoc_ids.txt --corpus-dir data/corpus` |
+| Nguyen | 2602.04870 → 2602.09869 | `python src/run_m1.py --ids-file nguyen_ids.txt --corpus-dir data/corpus` |
+| Khai | 2603.00580 → 2603.05579 | `python src/run_m1.py --ids-file khai_ids.txt --corpus-dir data/corpus` |
+| Tri | 2606.20734 → 2606.25733 | `python src/run_m1.py --ids-file tri_ids.txt --corpus-dir data/corpus` |
 
-Sau khi lấy metadata, chạy tiếp tải source và crawl reference cho cùng khoảng ID (thêm `--limit 5` nếu muốn chạy thử):
+Một số ID có thể không tồn tại (bị rút/gộp); crawler ghi nhận chúng là ID thất bại và tiếp tục (không phải lỗi).
 
-```bash
-python src/crawler/m1_source.py --range <khoảng_ID>
-python src/crawler/m1_references.py --range <khoảng_ID>
-python src/crawler/m1_references_batch.py --range <khoảng_ID> --batch-size 25
-```
-
-Một số ID trong khoảng có thể không tồn tại (bị rút/gộp). Chúng được ghi vào `data/failed_ids.txt` và không phải lỗi.
-
-Kiểm thử: `pytest src/tests` (đã có `pytest.ini` đặt `pythonpath = src`).
+Kiểm thử: `pytest src/tests` (đã có `pytest.ini` đặt `pythonpath = src`). `test_m1_references.py` kiểm tra batch request, cache khi chạy lại và chia nhóm khi API từ chối request quá lớn.
 
 ### Đo hiệu năng
-Đo trên Colab (CPU), với thư mục `data/` trống, chạy bằng `python src/run_m1.py ...`.
-Kết quả nằm ở `data/benchmark_m1.json`. Chỉ số: thời gian từng giai đoạn, RAM tối đa/trung bình,
-đĩa tối đa, dung lượng đầu ra. Có thể đo end-to-end bên ngoài bằng
-`python src/utils/benchmark.py --milestone m1 --watch data -- python src/run_m1.py ...`.
+
+Kết quả đo hiệu năng nằm ở `data/benchmark_m1.json` sau khi chạy kịch bản `run_m1.py`. Chỉ số bao gồm: thời gian từng giai đoạn, RAM tối đa/trung bình, đỉnh đĩa tối đa, dung lượng đầu ra thực tế. 
+Có thể đo thêm end-to-end bên ngoài bằng `benchmark.py` (tùy chọn).
 
 ## 8. Tài liệu nhãn và feature (M3)
 
