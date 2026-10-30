@@ -96,13 +96,12 @@ def fetch_source(session: requests.Session, arxiv_id: str, version: int) -> byte
 
     for attempt in range(1, MAX_RETRIES + 1):
         polite_wait()
+        _touch()
         try:
             resp = session.get(url, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as err:
-            _touch()
             last_problem = f"lỗi mạng: {err}"
         else:
-            _touch()
             if resp.status_code == 200:
                 return resp.content
             last_problem = f"HTTP {resp.status_code}"
