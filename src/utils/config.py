@@ -169,6 +169,28 @@ def version_dir(arxiv_id: str, version) -> Path:
     return paper_dir(arxiv_id) / label
 
 
+# ---------------------------------------------------------------- đường dẫn M2 (P3)
+def tree_raw_path(arxiv_id: str, version) -> Path:
+    return version_dir(arxiv_id, version) / "tree_raw.json"
+
+
+def cite_map_path(arxiv_id: str) -> Path:
+    """{khóa_cũ: khóa_đã_chọn} do Tri xuất sau khi gộp BibTeX (tùy chọn)."""
+    return paper_dir(arxiv_id) / "cite_map.json"
+
+
+def elements_path(arxiv_id: str) -> Path:
+    return paper_dir(arxiv_id) / "elements.json"
+
+
+def hierarchy_path(arxiv_id: str) -> Path:
+    return paper_dir(arxiv_id) / "hierarchy.json"
+
+
+def parse_status_path(arxiv_id: str) -> Path:
+    return paper_dir(arxiv_id) / "parse_status.json"
+
+
 if __name__ == "__main__":
     ids = list(iter_id_range(*parse_id_range("2602.04870-2602.09869")))
     print(len(ids), ids[0], ids[-1], paper_key("hep-th/9901001"), version_dir("2310.12345", 2))
