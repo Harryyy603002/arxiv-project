@@ -2,6 +2,7 @@ import json
 import io
 import sys
 import tarfile
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -114,6 +115,53 @@ def test_save_source_with_stats_extracts_and_accounts_in_one_pass(tmp_path):
     assert archive_bytes == len(data)
     assert before == len(b"\\documentclass{article}") + len(b"@article{x}") + len(b"image")
     assert after == len(b"\\documentclass{article}") + len(b"@article{x}")
+
+
+def test_crawl_batch_overlaps_reference_and_source_work(tmp_path, monkeypatch):
+    reference_started = threading.Event()
+    source_started = threading.Event()
+
+    def fetch_batch_group(_session, group):
+        reference_started.set()
+        assert source_started.wait(timeout=1)
+        return [{"references": []} for _ in group]
+
+    def fetch_source(_session, _arxiv_id, _version):
+        assert reference_started.wait(timeout=1)
+        source_started.set()
+        return b"source"
+
+    def save_source_with_stats(data, out_dir):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "main.tex").write_bytes(data)
+        return "ok", "", ["main.tex"], 10, 20, 8
+
+    monkeypatch.setattr(run_m1.m1_references, "fetch_batch_group", fetch_batch_group)
+    monkeypatch.setattr(run_m1.m1_download, "fetch_source", fetch_source)
+    monkeypatch.setattr(run_m1.m1_download, "save_source_with_stats", save_source_with_stats)
+
+    info = {
+        "1234.56789": {
+            "title": "Test",
+            "authors": [],
+            "venue": None,
+            "n_versions": 1,
+            "version_dates": {1: "2020-01-01"},
+        }
+    }
+    coverage = {
+        "expected_versions": 0,
+        "crawled_versions": 0,
+        "failed_versions": 0,
+        "not_found_papers": 0,
+    }
+
+    run_m1.crawl_batch(
+        ["1234.56789"], info, FakePerf(), tmp_path, object(), coverage
+    )
+
+    assert source_started.is_set()
+    assert coverage["crawled_versions"] == 1
 
 
 def test_standalone_process_writes_atomic_stats_checkpoint(tmp_path, monkeypatch):
