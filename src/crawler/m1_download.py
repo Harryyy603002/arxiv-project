@@ -130,14 +130,16 @@ def _safe_relative_path(name: str) -> PurePosixPath | None:
     return PurePosixPath(*parts)
 
 
-def _collect_tex_bib(tar: tarfile.TarFile) -> dict[str, bytes]:
+def _collect_tex_bib(tar: tarfile.TarFile) -> tuple[dict[str, bytes], int]:
     """Đọc CHỈ các file .tex/.bib từ file tar vào bộ nhớ (chưa ghi ra đĩa).
     Giữ nguyên đường dẫn con (vì \\input{sections/intro} cần đúng đường dẫn).
     Đọc hết rồi mới ghi để file nén hỏng không để lại file lưu dở dang."""
     found: dict[str, bytes] = {}
+    before_bytes = 0
     for member in tar.getmembers():
         if not member.isfile():
             continue
+        before_bytes += member.size
         rel = _safe_relative_path(member.name)
         if rel is None or rel.suffix.lower() not in KEEP_SUFFIXES:
             continue
@@ -147,7 +149,7 @@ def _collect_tex_bib(tar: tarfile.TarFile) -> dict[str, bytes]:
         if fileobj is None:
             continue
         found[rel.as_posix()] = fileobj.read()  # giữ nguyên bytes, không đổi mã hóa
-    return found
+    return found, before_bytes
 
 
 def _write_files(found: dict[str, bytes], out_dir: Path) -> list[str]:
@@ -177,40 +179,51 @@ def save_source(data: bytes, out_dir: Path) -> tuple[str, str, list[str]]:
       status = "ok"    -> có ít nhất một file .tex
       status = "empty" -> không có TeX (bản ghi rỗng); reason cho biết lý do
     """
-    # Trường hợp 1: chỉ có PDF (đầu file là "%PDF")
-    if data[:4] == b"%PDF":
-        return "empty", "pdf_only", []
+    status, reason, files, _archive, _before, _after = save_source_with_stats(data, out_dir)
+    return status, reason, files
 
-    # Trường hợp 2: file nén tar (.tar.gz) - phổ biến nhất
+
+def save_source_with_stats(
+    data: bytes, out_dir: Path
+) -> tuple[str, str, list[str], int, int, int]:
+    """Save source and return status, files, and archive byte statistics."""
+    archive_bytes = len(data)
+
+    if data[:4] == b"%PDF":
+        return "empty", "pdf_only", [], archive_bytes, archive_bytes, 0
+
     found: dict[str, bytes] | None
+    before_bytes = archive_bytes
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
-            found = _collect_tex_bib(tar)
+            found, before_bytes = _collect_tex_bib(tar)
     except tarfile.ReadError:
-        found = None  # không phải tar, thử tiếp các trường hợp dưới
+        found = None
     except (EOFError, OSError, zlib.error):
-        return "empty", "corrupt_archive", []  # file nén bị hỏng/cụt
+        return "empty", "corrupt_archive", [], archive_bytes, archive_bytes, 0
 
     if found is not None:
+        after_bytes = sum(len(content) for content in found.values())
         if any(name.lower().endswith(".tex") for name in found):
-            return "ok", "", _write_files(found, out_dir)
-        return "empty", "no_tex_in_archive", []
+            files = _write_files(found, out_dir)
+            return "ok", "", files, archive_bytes, before_bytes, after_bytes
+        return "empty", "no_tex_in_archive", [], archive_bytes, before_bytes, 0
 
-    # Trường hợp 3: một file .gz đơn lẻ (bài chỉ có đúng 1 file .tex)
     if data[:2] == b"\x1f\x8b":
         try:
             content = gzip.decompress(data)
         except (OSError, EOFError, zlib.error):
-            return "empty", "corrupt_archive", []
+            return "empty", "corrupt_archive", [], archive_bytes, archive_bytes, 0
         if _looks_like_tex(content):
-            return "ok", "", _write_main_tex(content, out_dir)
-        return "empty", "single_file_not_tex", []
+            files = _write_main_tex(content, out_dir)
+            return "ok", "", files, archive_bytes, len(content), len(content)
+        return "empty", "single_file_not_tex", [], archive_bytes, len(content), 0
 
-    # Trường hợp 4: file TeX thô, không nén
     if _looks_like_tex(data):
-        return "ok", "", _write_main_tex(data, out_dir)
+        files = _write_main_tex(data, out_dir)
+        return "ok", "", files, archive_bytes, archive_bytes, archive_bytes
 
-    return "empty", "unknown_format", []
+    return "empty", "unknown_format", [], archive_bytes, archive_bytes, 0
 
 
 # ----------------------------------------------------------------------------
@@ -226,7 +239,9 @@ def process_version(session: requests.Session, arxiv_id: str, version: int) -> s
         return "skipped"
 
     data = fetch_source(session, arxiv_id, version)
-    status, reason, files = save_source(data, out_dir)
+    status, reason, files, archive_bytes, before_bytes, after_bytes = save_source_with_stats(
+        data, out_dir
+    )
 
     record = {
         "arxiv_id": arxiv_id,
@@ -234,13 +249,20 @@ def process_version(session: requests.Session, arxiv_id: str, version: int) -> s
         "status": status,        # "ok" hoặc "empty"
         "reason": reason,        # lý do nếu rỗng
         "files": files,          # các file .tex/.bib đã lưu
+        "raw_bytes": archive_bytes,
+        "uncompressed_bytes": before_bytes,
+        "extracted_bytes": after_bytes,
         "source_url": f"{BASE_URL}/{arxiv_id}v{version}",
         "downloaded_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     # Ghi status SAU CÙNG: có file này nghĩa là version đã xong hoàn toàn.
-    status_file.write_text(json.dumps(record, ensure_ascii=False, indent=2),
-                           encoding="utf-8")
+    temporary = status_file.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(record, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(status_file)
     return status
 
 
