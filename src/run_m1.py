@@ -59,7 +59,16 @@ def read_ids(path: Path) -> List[str]:
 # ----------------------------------------------------------------------------- discovery
 def _query(client: arxiv.Client, id_list: List[str]):
     search = arxiv.Search(id_list=id_list, max_results=len(id_list))
-    return list(client.results(search))
+    for attempt in range(1, 6):
+        try:
+            return list(client.results(search))
+        except arxiv.HTTPError as error:
+            if error.status != 429 or attempt == 5:
+                raise
+            wait = 30 * attempt
+            log(f"[discovery] arXiv HTTP 429; waiting {wait}s before retry "
+                f"({attempt}/5)")
+            time.sleep(wait)
 
 
 def discover(ids: List[str], batch: int = 50) -> Dict[str, dict]:
