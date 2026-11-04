@@ -10,6 +10,7 @@ Phiên bản này đã được tích hợp cơ chế CRAWL REFERENCE BATCH từ
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import re
 import sys
@@ -163,29 +164,39 @@ def crawl_references(
 
 
 # ----------------------------------------------------------------------------- crawl batch
-def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corpus: Path,
-                session: requests.Session, coverage: dict) -> None:
-
-    # 1. Fetch batch reference trước
+def _fetch_reference_batch(group: List[str]) -> tuple[list, float]:
+    """Fetch one Semantic Scholar batch on a separate service stream."""
+    reference_session = requests.Session()
     started = time.perf_counter()
     try:
-        batch_data = m1_references.fetch_batch_group(session, group)
+        batch_data = m1_references.fetch_batch_group(reference_session, group)
     except m1_references.ReferenceCrawlError as err:
         log(f"[batch] ERROR lấy reference: {err}")
         batch_data = [None] * len(group)
+    finally:
+        reference_session.close()
+    seconds_per_paper = (time.perf_counter() - started) / len(group) if group else 0.0
+    return batch_data, seconds_per_paper
 
-    seconds_per_paper = (time.perf_counter() - started) / len(group)
 
-    # 2. Xử lý tải và ghi file cho từng bài trong batch
-    for aid, paper_s2 in zip(group, batch_data):
-        rec.add_paper_time(aid, seconds_per_paper)
+def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corpus: Path,
+            session: requests.Session, coverage: dict,
+            reference_executor: ThreadPoolExecutor | None = None) -> None:
+    """Process source downloads while the reference batch runs concurrently."""
+    owns_executor = reference_executor is None
+    executor = reference_executor or ThreadPoolExecutor(max_workers=1)
+    reference_future: Future[tuple[list, float]] = executor.submit(
+        _fetch_reference_batch, group
+    )
 
-        with rec.paper(aid):
+    try:
+        # Source downloads remain serial and use the single arXiv request stream.
+        processed = []
+        for aid in group:
             paper_info = info.get(aid)
             if not paper_info:
+                processed.append((aid, None, False))
                 log(f"[{aid}] NOT FOUND in arXiv API")
-                rec.record_result(aid, False)
-                rec.record_references(aid, False)
                 coverage["not_found_papers"] += 1
                 continue
 
@@ -211,7 +222,70 @@ def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corp
             }
             (pdir / "paper.json").write_text(json.dumps(paper_row, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            # --- Ghi chuẩn hóa references
+            # Source versions are downloaded before the reference result is joined.
+            with rec.paper(aid):
+                for v in range(1, n + 1):
+                    vid = f"{aid}v{v}"
+                    vdir = pdir / f"v{v}"
+                    checkpoint = vdir / "metadata.json"
+                    if checkpoint.exists():
+                        try:
+                            cached = json.loads(checkpoint.read_text(encoding="utf-8"))
+                            archive_bytes = int(cached["archive_bytes"])
+                            before = int(cached["bytes_before"])
+                            after = int(cached["bytes_after"])
+                        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                        else:
+                            rec.record_paper_size(
+                                aid, before, after, archive_bytes=0, is_pdf_only=after == 0
+                            )
+                            coverage["crawled_versions"] += 1
+                            continue
+                    try:
+                        data = m1_download.fetch_source(session, aid, v)
+                        (
+                            status,
+                            reason,
+                            files,
+                            archive_bytes,
+                            before,
+                            after,
+                        ) = m1_download.save_source_with_stats(data, vdir)
+                        no_tex = after == 0
+                        rec.record_paper_size(aid, before, after, archive_bytes, is_pdf_only=no_tex)
+                        record = {
+                            "arxiv_id": vid, "version": v, "date": dates.get(v), "title": paper_info["title"],
+                            "authors": paper_info["authors"], "venue": paper_info["venue"],
+                            "status": status, "reason": reason, "files": files,
+                            "archive_bytes": archive_bytes, "bytes_before": before, "bytes_after": after,
+                        }
+                        vdir.mkdir(parents=True, exist_ok=True)
+                        temporary = checkpoint.with_suffix(".json.tmp")
+                        temporary.write_text(
+                            json.dumps(record, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        temporary.replace(checkpoint)
+                        coverage["crawled_versions"] += 1
+                    except (m1_download.DownloadError, OSError, ValueError, TypeError) as e:
+                        all_ok = False
+                        coverage["failed_versions"] += 1
+                        log(f"[{vid}] ERROR tải source: {e}")
+
+            processed.append((aid, pdir, all_ok))
+
+        # Join the reference response after source work, then write reference
+        # checkpoints for every version without adding another network request.
+        batch_data, seconds_per_paper = reference_future.result()
+        for index, (aid, pdir, all_ok) in enumerate(processed):
+            rec.add_paper_time(aid, seconds_per_paper)
+            if pdir is None:
+                rec.record_result(aid, False)
+                rec.record_references(aid, False)
+                continue
+
+            paper_s2 = batch_data[index]
             raw_refs = paper_s2.get("references") if isinstance(paper_s2, dict) else None
             if isinstance(raw_refs, list):
                 refs = normalize_references(raw_refs)
@@ -219,61 +293,20 @@ def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corp
             else:
                 refs = []
                 ref_ok = False
-            rec.record_references(aid, ref_ok, len(refs), sum(1 for x in refs if x["ref_arxiv_id"]))
-
-            # --- Từng version
-            for v in range(1, n + 1):
-                vid = f"{aid}v{v}"
+            arxiv_ref_count = sum(1 for x in refs if x["ref_arxiv_id"])
+            rec.record_references(aid, ref_ok, len(refs), arxiv_ref_count)
+            for v in range(1, info[aid]["n_versions"] + 1):
                 vdir = pdir / f"v{v}"
-                checkpoint = vdir / "metadata.json"
-                if checkpoint.exists():
-                    try:
-                        cached = json.loads(checkpoint.read_text(encoding="utf-8"))
-                        archive_bytes = int(cached["archive_bytes"])
-                        before = int(cached["bytes_before"])
-                        after = int(cached["bytes_after"])
-                    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-                        pass
-                    else:
-                        rec.record_paper_size(
-                            aid, before, after, archive_bytes=0, is_pdf_only=after == 0
-                        )
-                        coverage["crawled_versions"] += 1
-                        continue
-                try:
-                    data = m1_download.fetch_source(session, aid, v)
-                    (
-                        status,
-                        reason,
-                        files,
-                        archive_bytes,
-                        before,
-                        after,
-                    ) = m1_download.save_source_with_stats(data, vdir)
-                    no_tex = after == 0
-                    rec.record_paper_size(aid, before, after, archive_bytes, is_pdf_only=no_tex)
-                    record = {
-                        "arxiv_id": vid, "version": v, "date": dates.get(v), "title": paper_info["title"],
-                        "authors": paper_info["authors"], "venue": paper_info["venue"],
-                        "status": status, "reason": reason, "files": files,
-                        "archive_bytes": archive_bytes, "bytes_before": before, "bytes_after": after,
-                    }
-                    vdir.mkdir(parents=True, exist_ok=True)
-                    temporary = checkpoint.with_suffix(".json.tmp")
-                    temporary.write_text(
-                        json.dumps(record, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
+                if vdir.exists():
+                    (vdir / "references.json").write_text(
+                        json.dumps(refs, ensure_ascii=False), encoding="utf-8"
                     )
-                    temporary.replace(checkpoint)
-                    (vdir / "references.json").write_text(json.dumps(refs, ensure_ascii=False), encoding="utf-8")
-                    coverage["crawled_versions"] += 1
-                except (m1_download.DownloadError, OSError, ValueError, TypeError) as e:
-                    all_ok = False
-                    coverage["failed_versions"] += 1
-                    log(f"[{vid}] ERROR tải source: {e}")
-
             rec.record_result(aid, all_ok)
-            log(f"[{aid}] versions={n} refs={len(refs)} ref_ok={ref_ok} ok={all_ok}")
+            log(f"[{aid}] versions={info[aid]['n_versions']} refs={len(refs)} "
+                f"ref_ok={ref_ok} ok={all_ok}")
+    finally:
+        if owns_executor:
+            executor.shutdown(wait=True)
 
 
 # ----------------------------------------------------------------------------- main
