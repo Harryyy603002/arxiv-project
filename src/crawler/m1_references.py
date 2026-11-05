@@ -342,19 +342,48 @@ def normalize_reference(citing_id: str, reference: dict) -> dict:
     }
 
 
+def deduplicate_references(rows: list[dict]) -> tuple[list[dict], int]:
+    """Keep the first occurrence of each reference identity deterministically."""
+    unique = []
+    seen = set()
+    duplicates = 0
+    for row in rows:
+        identity = (
+            row.get("ref_s2_id")
+            or row.get("ref_arxiv_id")
+            or (
+                str(row.get("ref_title") or "").strip().casefold(),
+                tuple(str(author).strip().casefold()
+                      for author in row.get("ref_authors") or []),
+                row.get("ref_submission_date"),
+            )
+        )
+        if identity in seen:
+            duplicates += 1
+            continue
+        seen.add(identity)
+        unique.append(row)
+    return unique, duplicates
+
+
 def build_published_references() -> dict[str, int]:
     """Export arXiv-linked references and report reproducible filter counts."""
     rows = []
     total = 0
     with_arxiv_id = 0
+    duplicate_rows = 0
     for refs_path in sorted(C.DATA_DIR.glob("*/refs.json")):
         payload = json.loads(refs_path.read_text(encoding="utf-8"))
         citing_id = payload.get("arxiv_id")
+        normalized = []
         for reference in payload.get("references", []):
             if not isinstance(reference, dict):
                 continue
             total += 1
-            row = normalize_reference(citing_id, reference)
+            normalized.append(normalize_reference(citing_id, reference))
+        normalized, duplicates = deduplicate_references(normalized)
+        duplicate_rows += duplicates
+        for row in normalized:
             if row["ref_arxiv_id"]:
                 with_arxiv_id += 1
                 rows.append(row)
@@ -378,6 +407,7 @@ def build_published_references() -> dict[str, int]:
         "references_with_arxiv_id": with_arxiv_id,
         "references_without_arxiv_id": total - with_arxiv_id,
         "published_rows": len(rows),
+        "duplicate_rows": duplicate_rows,
     }
     C.ensure_dir(C.DATA_DIR)
     (C.DATA_DIR / "references_stats.json").write_text(
@@ -386,17 +416,28 @@ def build_published_references() -> dict[str, int]:
     return stats
 
 
+def _write_crawl_stats(stats: dict[str, int | float]) -> None:
+    C.ensure_dir(C.DATA_DIR)
+    path = C.DATA_DIR / "references_crawl_stats.json"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
 def crawl(ids: list[str], force: bool = False,
           attempts: int = MAX_RETRIES, session: requests.Session | None = None,
           batch_size: int | None = None) -> tuple[int, int]:
     """Crawl IDs and return ``(written, failed)`` without persisting failed requests."""
+    started = time.monotonic()
     client = session or requests.Session()
     todo = list(dict.fromkeys(C.split_version(arxiv_id)[0] for arxiv_id in ids))
+    requested = len(todo)
     if not force:
         todo = [
             arxiv_id for arxiv_id in todo
             if not C.refs_path(arxiv_id).exists() or not C.raw_refs_path(arxiv_id).exists()
         ]
+    skipped = requested - len(todo)
     log.info("Need to crawl %d papers", len(todo))
 
     if batch_size:
@@ -424,6 +465,14 @@ def crawl(ids: list[str], force: bool = False,
                 written += 1
             log.info("Progress %d/%d | written=%d failed=%d",
                      min(offset + len(group), len(todo)), len(todo), written, failed)
+        _write_crawl_stats({
+            "requested": requested,
+            "attempted": len(todo),
+            "skipped": skipped,
+            "successful": written,
+            "failed": failed,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        })
         return written, failed
 
     written = failed = 0
@@ -439,6 +488,14 @@ def crawl(ids: list[str], force: bool = False,
         write_refs(arxiv_id, references)
         written += 1
         log.info("saved %s", C.refs_path(arxiv_id))
+    _write_crawl_stats({
+        "requested": requested,
+        "attempted": len(todo),
+        "skipped": skipped,
+        "successful": written,
+        "failed": failed,
+        "duration_seconds": round(time.monotonic() - started, 3),
+    })
     return written, failed
 
 

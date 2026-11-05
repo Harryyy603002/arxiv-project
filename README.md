@@ -77,6 +77,7 @@ data/
 ├── references.csv, references.parquet  # bảng references gộp (chỉ giữ ref có arXiv ID)
 ├── failed_ids.txt                      # ID không tồn tại / lỗi (không phải bug)
 ├── refs_failures.jsonl                 # lỗi Semantic Scholar có cấu trúc, dùng để chạy lại
+├── references_crawl_stats.json         # thống kê attempted/skipped/success/failed/duration
 ├── benchmark_m1.json                   # kết quả đo hiệu năng M1 (không commit)
 ├── labels/
 │   ├── manual_labels.csv
@@ -96,16 +97,19 @@ data/
 
 M1 reference crawling also stores the complete Semantic Scholar response separately
 as `<paper_key>/refs_raw.json`. The normalized local references remain in
-the integrated version files and are derived from the same normalizer; the
-standalone crawler keeps the response references in `refs.json` for
-backward-compatible resume behavior. arXiv identifiers are normalized by
+the integrated version files and the canonical paper-level `refs.json` are
+derived from the same normalizer; the standalone crawler keeps the response
+references in `refs.json` for backward-compatible resume behavior. arXiv identifiers are normalized by
 removing URL/`arXiv:` prefixes and version suffixes while raw responses retain
 the original values. Only rows with a usable `ref_arxiv_id` are exported to
 `data/references.csv` by `crawler.m1_references.build_published_references()`.
 The export writes `data/references_stats.json` with the raw/local and published
-row counts. Failed Semantic Scholar batches and malformed responses are
+row counts, including duplicate local rows removed from the published table.
+Failed Semantic Scholar batches and malformed responses are
 appended to `data/refs_failures.jsonl` with the citing ID, timestamp, attempt
 count, category, and error text; request headers are never written.
+Each standalone reference crawl also writes `data/references_crawl_stats.json`
+with requested, attempted, skipped, successful, failed, and duration fields.
 
 Version chỉ có PDF vẫn phải có thư mục `vN/` (rỗng). M2 coi đó là bản rỗng và tính vào thống kê, không được bỏ qua.
 

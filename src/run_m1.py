@@ -307,6 +307,8 @@ def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corp
                 ref_ok = False
             arxiv_ref_count = sum(1 for x in refs if x["ref_arxiv_id"])
             rec.record_references(aid, ref_ok, len(refs), arxiv_ref_count)
+            if ref_ok:
+                m1_references.write_refs(aid, refs)
             for v in range(1, info[aid]["n_versions"] + 1):
                 vdir = pdir / f"v{v}"
                 if vdir.exists():

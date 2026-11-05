@@ -68,11 +68,23 @@ def test_batch_crawl_writes_and_skips_cached_results(tmp_path, monkeypatch):
     assert raw_record["response"] == papers[0]
     assert raw_record["endpoint"].endswith("2606.20734")
     assert raw_record["retrieved_at"]
+    crawl_stats = json.loads(
+        (tmp_path / "references_crawl_stats.json").read_text(encoding="utf-8")
+    )
+    assert crawl_stats["requested"] == 2
+    assert crawl_stats["attempted"] == 2
+    assert crawl_stats["successful"] == 2
+    assert crawl_stats["failed"] == 0
 
     assert R.crawl(
         ["2606.20734", "2606.20735"], attempts=1, session=session, batch_size=25
     ) == (0, 0)
     assert len(session.calls) == 1
+    crawl_stats = json.loads(
+        (tmp_path / "references_crawl_stats.json").read_text(encoding="utf-8")
+    )
+    assert crawl_stats["skipped"] == 2
+    assert crawl_stats["attempted"] == 0
 
 
 def test_batch_crawl_splits_rejected_group(tmp_path, monkeypatch):
@@ -129,10 +141,28 @@ def test_published_references_export_filters_arxiv_targets(tmp_path, monkeypatch
         "references_with_arxiv_id": 1,
         "references_without_arxiv_id": 1,
         "published_rows": 1,
+        "duplicate_rows": 0,
     }
     lines = C.references_csv_path().read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert "1234.56789" in lines[1]
+
+
+def test_published_export_deduplicates_reference_identity_and_reports_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
+    C.ensure_dir(C.paper_dir("2606.20734"))
+    duplicate = {"paperId": "s2-a", "title": "Linked",
+                 "externalIds": {"ArXiv": "1234.56789"}}
+    C.refs_path("2606.20734").write_text(json.dumps({
+        "arxiv_id": "2606.20734",
+        "references": [duplicate, duplicate],
+    }), encoding="utf-8")
+
+    stats = R.build_published_references()
+
+    assert stats["total_local_references"] == 2
+    assert stats["duplicate_rows"] == 1
+    assert stats["published_rows"] == 1
 
 
 def test_reference_ids_are_normalized_without_changing_raw_payload():
@@ -196,3 +226,4 @@ def test_run_m1_fetches_references_in_batches(tmp_path, monkeypatch):
     assert calls == [ids]
     assert perf.ref_stats == {arxiv_id: (True, 1, 1) for arxiv_id in ids}
     assert all(perf.paper_times[arxiv_id] >= 0 for arxiv_id in ids)
+    assert C.refs_path(ids[0]).exists()
