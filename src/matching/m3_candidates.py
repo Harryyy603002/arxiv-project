@@ -7,18 +7,34 @@ import unicodedata
 from difflib import SequenceMatcher
 
 
+def _strip_latex(text: str) -> str:
+    text = re.sub(r"\\([A-Za-z]+)", r" \1 ", text)
+    return re.sub(r"\\([^A-Za-z\s])", r"\1", text)
+
+
 def normalize_text(value: object) -> str:
     """Normalize comparison text while leaving source fields untouched."""
-    text = unicodedata.normalize("NFKC", str(value or ""))
-    text = re.sub(r"[{}\\]", " ", text)
+    text = _strip_latex(str(value or ""))
+    text = text.replace("{", "").replace("}", "")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
 def normalize_authors(value: object) -> str:
     if isinstance(value, list):
         names = [item.get("name", "") if isinstance(item, dict) else str(item) for item in value]
-        return " ".join(normalize_text(name) for name in names if name)
-    return normalize_text(value)
+    else:
+        names = re.split(r"\s+\band\b\s+", str(value or ""), flags=re.IGNORECASE)
+
+    normalized = []
+    for name in names:
+        name = normalize_text(name)
+        if "," in name:
+            last, first = (part.strip() for part in name.split(",", 1))
+            name = f"{first} {last}".strip()
+        normalized.append(name)
+    return " ".join(name for name in normalized if name)
 
 
 def similarity(left: str, right: str) -> float:
@@ -47,6 +63,11 @@ def generate_candidates(bib_entries: list[dict], references: list[dict],
                 "ref_arxiv_id": reference.get("ref_arxiv_id"),
                 "title_similarity": title_score,
                 "author_similarity": similarity(bib_authors, reference_authors),
+                "bib_title_normalized": normalize_text(bib_title),
+                "ref_title_normalized": normalize_text(reference_title),
+                "bib_authors_normalized": bib_authors,
+                "ref_authors_normalized": reference_authors,
+                "title_exact": normalize_text(bib_title) == normalize_text(reference_title),
                 "bib_title": bib_title,
                 "ref_title": reference_title,
             })

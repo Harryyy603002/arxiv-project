@@ -250,8 +250,10 @@ python src/run_m2.py
 
 M2 tạo `bibtex_merged.json`, `candidates.json`, và `m2_stats.json` trong từng
 thư mục bài. Các file được ghi atomically để có thể chạy lại an toàn; citation
-keys trùng được gộp theo title/author/year và các lệnh `\cite{...}` đang hoạt
-động được cập nhật theo khóa canonical.
+keys trùng được gộp theo normalized title/author/year và các lệnh `\cite{...}` đang hoạt
+động được cập nhật theo khóa canonical. Candidate rows giữ trường gốc và
+normalized cho title/author, cùng feature exact-title và fuzzy similarity;
+`m2_stats.json` có thống kê candidate theo từng entry và tổng exact/fuzzy.
 
 ## 8. Tài liệu nhãn và feature (M3)
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
+from matching.m3_candidates import normalize_authors, normalize_text
+
 
 def _merge_value(current: str | None, incoming: str | None) -> tuple[str | None, bool]:
     if current:
@@ -43,8 +45,8 @@ def deduplicate_keys(entries: list[dict]) -> tuple[list[dict], dict[str, str], l
     groups = defaultdict(list)
     for entry in entries:
         identity = (
-            " ".join(str(entry.get("title", "")).lower().split()),
-            " ".join(str(entry.get("author", "")).lower().split()),
+            normalize_text(entry.get("title", "")),
+            normalize_authors(entry.get("author", entry.get("authors", ""))),
             str(entry.get("year", "")),
         )
         if not any(identity):

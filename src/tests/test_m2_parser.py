@@ -1,6 +1,6 @@
 from parser.m2_bib_dedup import deduplicate_keys, rewrite_citations
 from parser.m2_bibitem import parse_bibtex_entries
-from matching.m3_candidates import generate_candidates, normalize_text
+from matching.m3_candidates import generate_candidates, normalize_authors, normalize_text
 from run_m2 import process_paper
 import json
 
@@ -55,6 +55,18 @@ def test_candidate_generation_stays_within_citing_paper_and_keeps_features():
     assert candidates[0]["ref_arxiv_id"] == "9876.54321"
     assert candidates[0]["title_similarity"] == 1.0
     assert normalize_text(r"{A \LaTeX}  Study") == "a latex study"
+    assert candidates[0]["title_exact"] is True
+    assert candidates[0]["bib_title_normalized"] == "a study of models"
+
+
+def test_normalization_handles_accents_latex_and_author_forms():
+    assert normalize_text(r"{Étude} \& {\LaTeX}") == "etude & latex"
+    assert normalize_authors("Doe, Jane and García Márquez, Gabriel") == (
+        "jane doe gabriel garcia marquez"
+    )
+    assert normalize_authors([{"name": "Jane Doe"}, {"name": "García Márquez"}]) == (
+        "jane doe garcia marquez"
+    )
 
 
 def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
@@ -76,6 +88,9 @@ def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
 
     assert stats["bibtex_entries_ingested"] == 1
     assert stats["candidate_pairs"] == 1
+    assert stats["candidates_per_entry"] == {"first": 1}
+    assert stats["candidate_count_min"] == 1
+    assert stats["candidate_count_max"] == 1
     assert (paper / "bibtex_merged.json").exists()
     assert (paper / "candidates.json").exists()
     assert (paper / "m2_stats.json").exists()

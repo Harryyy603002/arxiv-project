@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 from pathlib import Path
 
 from matching.m3_candidates import generate_candidates
@@ -58,6 +59,15 @@ def process_paper(paper_dir: Path) -> dict:
     references = _load_references(paper_dir)
     candidates = generate_candidates(merged, references)
     validate_candidate_rows(candidates)
+    candidates_per_entry = {
+        entry.get("citation_key"): sum(
+            candidate["citation_key"] == entry.get("citation_key")
+            for candidate in candidates
+        )
+        for entry in merged
+    }
+    candidate_counts = list(candidates_per_entry.values())
+    exact_title_candidates = sum(candidate["title_exact"] for candidate in candidates)
     _atomic_json(paper_dir / "bibtex_merged.json", merged)
     _atomic_json(paper_dir / "candidates.json", candidates)
     stats = {
@@ -69,10 +79,19 @@ def process_paper(paper_dir: Path) -> dict:
         "references_ingested": len(references),
         "candidate_pairs": len(candidates),
         "zero_candidate_entries": sum(
-            1 for entry in merged
-            if not any(candidate["citation_key"] == entry.get("citation_key")
-                       for candidate in candidates)
+            count == 0 for count in candidates_per_entry.values()
         ),
+        "candidates_per_entry": candidates_per_entry,
+        "candidate_count_min": min(candidates_per_entry.values(), default=0),
+        "candidate_count_max": max(candidates_per_entry.values(), default=0),
+        "candidate_count_average": (
+            round(statistics.fmean(candidate_counts), 3) if candidate_counts else 0.0
+        ),
+        "candidate_count_median": (
+            statistics.median(candidate_counts) if candidate_counts else 0
+        ),
+        "exact_title_candidates": exact_title_candidates,
+        "fuzzy_title_candidates": len(candidates) - exact_title_candidates,
     }
     _atomic_json(paper_dir / "m2_stats.json", stats)
     return stats
