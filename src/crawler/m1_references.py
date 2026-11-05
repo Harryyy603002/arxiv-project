@@ -32,6 +32,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils import config as C  # noqa: E402
+from utils.schemas import validate_reference_rows
 
 log = logging.getLogger("m1_references")
 
@@ -343,6 +344,7 @@ def build_published_references() -> dict[str, int]:
 
     output = C.references_csv_path()
     C.ensure_dir(output.parent)
+    validate_reference_rows(rows)
     temporary = output.with_suffix(output.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=PUBLISHED_REFERENCE_FIELDS)

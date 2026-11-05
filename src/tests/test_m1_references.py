@@ -1,11 +1,13 @@
 import json
 import sys
+import pytest
 from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from crawler import m1_references as R  # noqa: E402
 from utils import config as C  # noqa: E402
+from utils.schemas import validate_reference_rows  # noqa: E402
 from run_m1 import crawl_references  # noqa: E402
 
 
@@ -131,6 +133,20 @@ def test_published_references_export_filters_arxiv_targets(tmp_path, monkeypatch
     lines = C.references_csv_path().read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert "1234.56789" in lines[1]
+
+
+def test_published_reference_schema_rejects_empty_identifiers():
+    with pytest.raises(ValueError, match="empty identifier"):
+        validate_reference_rows([{
+            "arxiv_id": "",
+            "ref_arxiv_id": "",
+            "ref_title": None,
+            "ref_authors": [],
+            "ref_submission_date": None,
+            "ref_venue": None,
+            "ref_s2_id": None,
+            "external_ids": {},
+        }])
 
 
 def test_run_m1_fetches_references_in_batches(tmp_path, monkeypatch):

@@ -9,6 +9,7 @@ from matching.m3_candidates import generate_candidates
 from parser.m2_bib_dedup import deduplicate_keys, rewrite_citations
 from parser.m2_bibitem import parse_bibtex_entries
 from utils import config as C
+from utils.schemas import validate_candidate_rows
 
 
 def _corpus_dir() -> Path:
@@ -56,6 +57,7 @@ def process_paper(paper_dir: Path) -> dict:
 
     references = _load_references(paper_dir)
     candidates = generate_candidates(merged, references)
+    validate_candidate_rows(candidates)
     _atomic_json(paper_dir / "bibtex_merged.json", merged)
     _atomic_json(paper_dir / "candidates.json", candidates)
     stats = {
