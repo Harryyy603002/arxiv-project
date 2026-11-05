@@ -61,6 +61,9 @@ def test_batch_crawl_writes_and_skips_cached_results(tmp_path, monkeypatch):
     assert json.loads(C.refs_path("2606.20734").read_text()) == {
         "arxiv_id": "2606.20734", "references": papers[0]["references"]
     }
+    assert json.loads(C.raw_refs_path("2606.20734").read_text()) == {
+        "arxiv_id": "2606.20734", "response": papers[0]
+    }
 
     assert R.crawl(
         ["2606.20734", "2606.20735"], attempts=1, session=session, batch_size=25
