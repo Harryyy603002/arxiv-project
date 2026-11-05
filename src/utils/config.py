@@ -171,6 +171,10 @@ def references_table_path() -> Path:
     return DATA_DIR / "references.jsonl"
 
 
+def references_csv_path() -> Path:
+    return DATA_DIR / "references.csv"
+
+
 def version_dir(arxiv_id: str, version) -> Path:
     """version: 'v2' hoặc 2."""
     label = version if isinstance(version, str) else f"v{int(version)}"

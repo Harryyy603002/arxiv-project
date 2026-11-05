@@ -20,6 +20,7 @@ Chống rate limit (HTTP 429):
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime, timezone
 import json
 import logging
@@ -286,6 +287,84 @@ def validate_reference_payload(payload: object) -> list:
         if not isinstance(reference, dict):
             raise ReferenceCrawlError(f"reference {index} is not an object")
     return references
+
+
+PUBLISHED_REFERENCE_FIELDS = (
+    "arxiv_id", "ref_arxiv_id", "ref_title", "ref_authors",
+    "ref_submission_date", "ref_venue", "ref_s2_id", "external_ids",
+)
+
+
+def _reference_row(citing_id: str, reference: dict) -> dict:
+    external_ids = reference.get("externalIds")
+    if not isinstance(external_ids, dict):
+        external_ids = reference.get("external_ids")
+    external_ids = external_ids if isinstance(external_ids, dict) else {}
+    authors = reference.get("authors")
+    if authors is None:
+        authors = reference.get("ref_authors")
+    if isinstance(authors, list):
+        authors = [
+            author.get("name", "") if isinstance(author, dict) else str(author)
+            for author in authors
+        ]
+    return {
+        "arxiv_id": citing_id,
+        "ref_arxiv_id": reference.get("ref_arxiv_id") or external_ids.get("ArXiv"),
+        "ref_title": reference.get("ref_title") or reference.get("title"),
+        "ref_authors": authors or [],
+        "ref_submission_date": (
+            reference.get("ref_submission_date")
+            or reference.get("publicationDate")
+            or (str(reference["year"]) if reference.get("year") else None)
+        ),
+        "ref_venue": reference.get("ref_venue") or reference.get("venue"),
+        "ref_s2_id": reference.get("ref_s2_id") or reference.get("paperId"),
+        "external_ids": external_ids,
+    }
+
+
+def build_published_references() -> dict[str, int]:
+    """Export arXiv-linked references and report reproducible filter counts."""
+    rows = []
+    total = 0
+    with_arxiv_id = 0
+    for refs_path in sorted(C.DATA_DIR.glob("*/refs.json")):
+        payload = json.loads(refs_path.read_text(encoding="utf-8"))
+        citing_id = payload.get("arxiv_id")
+        for reference in payload.get("references", []):
+            if not isinstance(reference, dict):
+                continue
+            total += 1
+            row = _reference_row(citing_id, reference)
+            if row["ref_arxiv_id"]:
+                with_arxiv_id += 1
+                rows.append(row)
+
+    output = C.references_csv_path()
+    C.ensure_dir(output.parent)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PUBLISHED_REFERENCE_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                **row,
+                "ref_authors": json.dumps(row["ref_authors"], ensure_ascii=False),
+                "external_ids": json.dumps(row["external_ids"], ensure_ascii=False),
+            })
+    temporary.replace(output)
+    stats = {
+        "total_local_references": total,
+        "references_with_arxiv_id": with_arxiv_id,
+        "references_without_arxiv_id": total - with_arxiv_id,
+        "published_rows": len(rows),
+    }
+    C.ensure_dir(C.DATA_DIR)
+    (C.DATA_DIR / "references_stats.json").write_text(
+        json.dumps(stats, indent=2), encoding="utf-8"
+    )
+    return stats
 
 
 def crawl(ids: list[str], force: bool = False,

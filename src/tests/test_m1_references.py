@@ -109,6 +109,30 @@ def test_raw_checkpoint_is_required_for_resume(tmp_path, monkeypatch):
     assert C.raw_refs_path("2606.20734").exists()
 
 
+def test_published_references_export_filters_arxiv_targets(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
+    C.ensure_dir(C.paper_dir("2606.20734"))
+    C.refs_path("2606.20734").write_text(json.dumps({
+        "arxiv_id": "2606.20734",
+        "references": [
+            {"paperId": "s2-a", "title": "Linked", "externalIds": {"ArXiv": "1234.56789"}},
+            {"paperId": "s2-b", "title": "Unlinked", "externalIds": {}},
+        ],
+    }), encoding="utf-8")
+
+    stats = R.build_published_references()
+
+    assert stats == {
+        "total_local_references": 2,
+        "references_with_arxiv_id": 1,
+        "references_without_arxiv_id": 1,
+        "published_rows": 1,
+    }
+    lines = C.references_csv_path().read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert "1234.56789" in lines[1]
+
+
 def test_run_m1_fetches_references_in_batches(tmp_path, monkeypatch):
     import run_m1
 
