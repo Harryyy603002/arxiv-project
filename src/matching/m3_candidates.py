@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import hashlib
+import json
 from difflib import SequenceMatcher
 
 
@@ -56,7 +58,7 @@ def generate_candidates(bib_entries: list[dict], references: list[dict],
             title_score = similarity(bib_title, reference_title)
             if title_score < min_title_similarity:
                 continue
-            candidates.append({
+            candidate = {
                 "arxiv_id": bib.get("arxiv_id", reference.get("arxiv_id")),
                 "citation_key": bib.get("citation_key"),
                 "ref_s2_id": reference.get("ref_s2_id", reference.get("paperId")),
@@ -70,5 +72,15 @@ def generate_candidates(bib_entries: list[dict], references: list[dict],
                 "title_exact": normalize_text(bib_title) == normalize_text(reference_title),
                 "bib_title": bib_title,
                 "ref_title": reference_title,
-            })
+            }
+            identity = {
+                "arxiv_id": candidate["arxiv_id"],
+                "citation_key": candidate["citation_key"],
+                "ref_s2_id": candidate["ref_s2_id"],
+                "ref_arxiv_id": candidate["ref_arxiv_id"],
+            }
+            candidate["candidate_id"] = hashlib.sha256(
+                json.dumps(identity, sort_keys=True, ensure_ascii=True).encode("utf-8")
+            ).hexdigest()[:16]
+            candidates.append(candidate)
     return candidates

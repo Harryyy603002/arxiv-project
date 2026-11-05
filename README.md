@@ -248,7 +248,7 @@ Sau khi M1 đã tạo các thư mục `corpus/<paper_key>/vN/` có file `.bib`, 
 python src/run_m2.py
 ```
 
-M2 tạo `bibtex_merged.json`, `candidates.json`, và `m2_stats.json` trong từng
+M2 tạo `bibtex_entries_raw.json`, `bibtex_merged.json`, `candidates.json`, và `m2_stats.json` trong từng
 thư mục bài. Các file được ghi atomically để có thể chạy lại an toàn; citation
 keys trùng được gộp theo normalized title/author/year và các lệnh `\cite{...}` đang hoạt
 động được cập nhật theo khóa canonical. Candidate rows giữ trường gốc và

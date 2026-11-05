@@ -57,6 +57,13 @@ def test_candidate_generation_stays_within_citing_paper_and_keeps_features():
     assert normalize_text(r"{A \LaTeX}  Study") == "a latex study"
     assert candidates[0]["title_exact"] is True
     assert candidates[0]["bib_title_normalized"] == "a study of models"
+    assert len(candidates[0]["candidate_id"]) == 16
+    assert candidates[0]["candidate_id"] == generate_candidates(
+        [{"arxiv_id": "1234.56789", "citation_key": "key",
+          "title": "A Study of Models", "author": "Doe, Jane"}],
+        [{"ref_arxiv_id": "9876.54321", "ref_s2_id": "s2",
+          "ref_title": "A Study of Models", "ref_authors": ["Jane Doe"]}],
+    )[0]["candidate_id"]
 
 
 def test_normalization_handles_accents_latex_and_author_forms():
@@ -92,5 +99,6 @@ def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
     assert stats["candidate_count_min"] == 1
     assert stats["candidate_count_max"] == 1
     assert (paper / "bibtex_merged.json").exists()
+    assert (paper / "bibtex_entries_raw.json").exists()
     assert (paper / "candidates.json").exists()
     assert (paper / "m2_stats.json").exists()

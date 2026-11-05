@@ -13,6 +13,7 @@ REFERENCE_FIELDS = (
     "external_ids",
 )
 CANDIDATE_FIELDS = (
+    "candidate_id",
     "arxiv_id",
     "citation_key",
     "ref_s2_id",

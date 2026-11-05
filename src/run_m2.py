@@ -50,6 +50,7 @@ def process_paper(paper_dir: Path) -> dict:
         ))
 
     merged, replacements, conflicts = deduplicate_keys(entries)
+    _atomic_json(paper_dir / "bibtex_entries_raw.json", entries)
     for tex_file in sorted(paper_dir.glob("v*/*.tex")):
         text = tex_file.read_text(encoding="utf-8", errors="replace")
         rewritten = rewrite_citations(text, replacements)
