@@ -93,6 +93,13 @@ data/
             └── tree_raw.json           # cây thô, text chưa làm sạch (Phục vụ M2/M3)
 ```
 
+M1 reference crawling also stores the complete Semantic Scholar response separately
+as `<paper_key>/refs_raw.json`. The normalized local references remain in
+`refs.json`; only rows with a usable `ref_arxiv_id` are exported to
+`data/references.csv` by `crawler.m1_references.build_published_references()`.
+The export writes `data/references_stats.json` with the raw/local and published
+row counts.
+
 Version chỉ có PDF vẫn phải có thư mục `vN/` (rỗng). M2 coi đó là bản rỗng và tính vào thống kê, không được bỏ qua.
 
 ### Các file trao đổi giữa các thành viên
@@ -221,6 +228,19 @@ Kiểm thử: `pytest src/tests` (đã có `pytest.ini` đặt `pythonpath = src
 
 Kết quả đo hiệu năng nằm ở `data/benchmark_m1.json` sau khi chạy kịch bản `run_m1.py`. Chỉ số bao gồm: thời gian từng giai đoạn, RAM tối đa/trung bình, đỉnh đĩa tối đa, dung lượng đầu ra thực tế. 
 Có thể đo thêm end-to-end bên ngoài bằng `benchmark.py` (tùy chọn).
+
+### Chạy M2
+
+Sau khi M1 đã tạo các thư mục `corpus/<paper_key>/vN/` có file `.bib`, chạy:
+
+```bash
+python src/run_m2.py
+```
+
+M2 tạo `bibtex_merged.json`, `candidates.json`, và `m2_stats.json` trong từng
+thư mục bài. Các file được ghi atomically để có thể chạy lại an toàn; citation
+keys trùng được gộp theo title/author/year và các lệnh `\cite{...}` đang hoạt
+động được cập nhật theo khóa canonical.
 
 ## 8. Tài liệu nhãn và feature (M3)
 
