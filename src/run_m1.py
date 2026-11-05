@@ -10,43 +10,24 @@ Phiên bản này đã được tích hợp cơ chế CRAWL REFERENCE BATCH từ
 from __future__ import annotations
 
 import argparse
-import gzip
-import io
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
-import posixpath
 import re
 import sys
-import tarfile
 import time
-import urllib.error
-import urllib.request
-import zlib
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import arxiv
 import requests
 
 # Khai báo đường dẫn để import các module nội bộ (crawler, utils)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from crawler import m1_references
-from utils.benchmark import PerfRecorder, inspect_archive_bytes
+from crawler import m1_download, m1_references
+from utils import config as C
+from utils.benchmark import PerfRecorder
 
 VERSION_RE = re.compile(r"v(\d+)$")
-
-# ----------------------------------------------------------------------------- tiện ích
-class RateLimiter:
-    """Đảm bảo khoảng cách tối thiểu giữa hai request liên tiếp (dành cho arXiv export)."""
-    def __init__(self, min_interval: float):
-        self.min_interval = min_interval
-        self._last = 0.0
-
-    def wait(self) -> None:
-        delta = time.monotonic() - self._last
-        if delta < self.min_interval:
-            time.sleep(self.min_interval - delta)
-        self._last = time.monotonic()
-
 
 def log(msg: str) -> None:
     print(msg, flush=True)
@@ -78,7 +59,16 @@ def read_ids(path: Path) -> List[str]:
 # ----------------------------------------------------------------------------- discovery
 def _query(client: arxiv.Client, id_list: List[str]):
     search = arxiv.Search(id_list=id_list, max_results=len(id_list))
-    return list(client.results(search))
+    for attempt in range(1, 6):
+        try:
+            return list(client.results(search))
+        except arxiv.HTTPError as error:
+            if error.status != 429 or attempt == 5:
+                raise
+            wait = 30 * attempt
+            log(f"[discovery] arXiv HTTP 429; waiting {wait}s before retry "
+                f"({attempt}/5)")
+            time.sleep(wait)
 
 
 def discover(ids: List[str], batch: int = 50) -> Dict[str, dict]:
@@ -108,111 +98,115 @@ def discover(ids: List[str], batch: int = 50) -> Dict[str, dict]:
     return info
 
 
-# ----------------------------------------------------------------------------- download
-def fetch_source(url: str, user_agent: str, limiter: RateLimiter, retries: int = 4) -> bytes:
-    last_err: Optional[Exception] = None
-    for attempt in range(retries):
-        limiter.wait()
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                return resp.read()
-        except urllib.error.HTTPError as e:
-            last_err = e
-            if e.code not in (429, 500, 502, 503, 504):
-                raise
-            retry_after = e.headers.get("Retry-After") if e.headers else None
-            time.sleep(float(retry_after) if retry_after and retry_after.isdigit() else 10 * (attempt + 1))
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-            last_err = e
-            time.sleep(5 * (attempt + 1))
-    raise RuntimeError(f"download failed after {retries} attempts: {url} ({last_err})")
-
-
-def looks_like_text(raw: bytes) -> bool:
-    return b"\x00" not in raw[:4096]
-
-
-def extract_tex_bib(data: bytes, vdir: Path) -> str:
-    """Chỉ ghi .tex và .bib vào vdir. Trả về loại: tar | gz-tex | text-tex | pdf | other."""
-    vdir.mkdir(parents=True, exist_ok=True)
-    if data[:4] == b"%PDF":
-        return "pdf"
-
-    try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
-            for m in tar.getmembers():
-                if not m.isfile() or not m.name.lower().endswith((".tex", ".bib")):
-                    continue
-                rel = posixpath.normpath(m.name).lstrip("/")
-                if rel.startswith("..") or "/../" in rel:
-                    continue
-                f = tar.extractfile(m)
-                if f is None:
-                    continue
-                dest = vdir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(f.read())
-        return "tar"
-    except (tarfile.ReadError, EOFError, OSError, zlib.error):
-        pass
-
-    raw, kind = data, "text-tex"
-    if data[:2] == b"\x1f\x8b":
-        try:
-            raw, kind = gzip.decompress(data), "gz-tex"
-        except (OSError, EOFError, zlib.error):
-            return "other"
-        if raw[:4] == b"%PDF":
-            return "pdf"
-    if looks_like_text(raw):
-        (vdir / "main.tex").write_bytes(raw)
-        return kind
-    return "other"
-
-
 # ----------------------------------------------------------------------------- references
 def normalize_references(raw_refs: list) -> list:
     """Chuẩn hóa cấu trúc JSON từ Semantic Scholar về đúng format yêu cầu."""
-    refs = []
-    for ref in raw_refs:
-        ext = ref.get("externalIds") or {}
-        refs.append({
-            "ref_s2_id": ref.get("paperId"),
-            "ref_arxiv_id": ext.get("ArXiv"),
-            "ref_title": ref.get("title"),
-            "ref_authors": [a.get("name") for a in (ref.get("authors") or [])],
-            "ref_submission_date": ref.get("publicationDate") or (str(ref["year"]) if ref.get("year") else None),
-            "ref_venue": ref.get("venue"),
-            "external_ids": ext,
-        })
-    return refs
+    return [
+        {
+            key: value
+            for key, value in m1_references.normalize_reference("", ref).items()
+            if key != "arxiv_id"
+        }
+        for ref in raw_refs
+        if isinstance(ref, dict)
+    ]
+
+
+def build_references_table() -> int:
+    """Compatibility hook for callers that build the references table separately."""
+    return 0
+
+
+def crawl_references(
+    ids: List[str],
+    perf: PerfRecorder,
+    force: bool = False,
+    batch_size: int = m1_references.DEFAULT_BATCH_SIZE,
+) -> None:
+    """Fetch references in batches for the legacy run_m1 API."""
+    session = requests.Session()
+    pending = []
+    seen = set()
+
+    for raw_id in ids:
+        aid = C.split_version(raw_id)[0]
+        if aid in seen or not C.meta_path(aid).exists():
+            continue
+        seen.add(aid)
+        if not force and C.refs_path(aid).exists():
+            continue
+        pending.append(aid)
+
+    for offset in range(0, len(pending), batch_size):
+        group = pending[offset:offset + batch_size]
+        started = time.perf_counter()
+        try:
+            papers = m1_references.fetch_batch_group(session, group)
+        except m1_references.ReferenceCrawlError as error:
+            papers = [None] * len(group)
+            for aid in group:
+                m1_references.record_failure(aid, m1_references.MAX_RETRIES,
+                                              error, "request_failure")
+        seconds_per_paper = (time.perf_counter() - started) / len(group)
+
+        for aid, paper in zip(group, papers):
+            perf.add_paper_time(aid, seconds_per_paper)
+            refs = paper.get("references") if isinstance(paper, dict) else None
+            if not isinstance(refs, list):
+                m1_references.record_failure(aid, 0, "response has no references list",
+                                              "invalid_response")
+                perf.record_references(aid, False)
+                continue
+            m1_references.write_refs(aid, refs)
+            perf.record_references(
+                aid,
+                True,
+                total_refs=len(refs),
+                arxiv_refs=sum(
+                    1 for ref in refs
+                    if isinstance(ref, dict)
+                    and isinstance(ref.get("externalIds"), dict)
+                    and (ref["externalIds"].get("ArXiv") or ref["externalIds"].get("arxiv"))
+                ),
+            )
+
+    build_references_table()
 
 
 # ----------------------------------------------------------------------------- crawl batch
-def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corpus: Path,
-                user_agent: str, src_limiter: RateLimiter, session: requests.Session, coverage: dict) -> None:
-
-    # 1. Fetch batch reference trước
+def _fetch_reference_batch(group: List[str]) -> tuple[list, float]:
+    """Fetch one Semantic Scholar batch on a separate service stream."""
+    reference_session = requests.Session()
     started = time.perf_counter()
     try:
-        batch_data = m1_references.fetch_batch_group(session, group)
+        batch_data = m1_references.fetch_batch_group(reference_session, group)
     except m1_references.ReferenceCrawlError as err:
         log(f"[batch] ERROR lấy reference: {err}")
         batch_data = [None] * len(group)
+    finally:
+        reference_session.close()
+    seconds_per_paper = (time.perf_counter() - started) / len(group) if group else 0.0
+    return batch_data, seconds_per_paper
 
-    seconds_per_paper = (time.perf_counter() - started) / len(group)
 
-    # 2. Xử lý tải và ghi file cho từng bài trong batch
-    for aid, paper_s2 in zip(group, batch_data):
-        rec.add_paper_time(aid, seconds_per_paper)
+def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corpus: Path,
+            session: requests.Session, coverage: dict,
+            reference_executor: ThreadPoolExecutor | None = None) -> None:
+    """Process source downloads while the reference batch runs concurrently."""
+    owns_executor = reference_executor is None
+    executor = reference_executor or ThreadPoolExecutor(max_workers=1)
+    reference_future: Future[tuple[list, float]] = executor.submit(
+        _fetch_reference_batch, group
+    )
 
-        with rec.paper(aid):
+    try:
+        # Source downloads remain serial and use the single arXiv request stream.
+        processed = []
+        for aid in group:
             paper_info = info.get(aid)
             if not paper_info:
+                processed.append((aid, None, False))
                 log(f"[{aid}] NOT FOUND in arXiv API")
-                rec.record_result(aid, False)
-                rec.record_references(aid, False)
                 coverage["not_found_papers"] += 1
                 continue
 
@@ -238,7 +232,72 @@ def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corp
             }
             (pdir / "paper.json").write_text(json.dumps(paper_row, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            # --- Ghi chuẩn hóa references
+            # Source versions are downloaded before the reference result is joined.
+            with rec.paper(aid):
+                for v in range(1, n + 1):
+                    vid = f"{aid}v{v}"
+                    vdir = pdir / f"v{v}"
+                    checkpoint = vdir / "metadata.json"
+                    if checkpoint.exists():
+                        try:
+                            cached = json.loads(checkpoint.read_text(encoding="utf-8"))
+                            archive_bytes = int(cached["archive_bytes"])
+                            before = int(cached["bytes_before"])
+                            after = int(cached["bytes_after"])
+                        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                        else:
+                            rec.record_paper_size(
+                                aid, before, after, archive_bytes=0, is_pdf_only=after == 0
+                            )
+                            coverage["crawled_versions"] += 1
+                            continue
+                    try:
+                        data = m1_download.fetch_source(session, aid, v)
+                        (
+                            status,
+                            reason,
+                            files,
+                            archive_bytes,
+                            before,
+                            after,
+                        ) = m1_download.save_source_with_stats(data, vdir)
+                        no_tex = after == 0
+                        rec.record_paper_size(aid, before, after, archive_bytes, is_pdf_only=no_tex)
+                        record = {
+                            "arxiv_id": vid, "version": v, "date": dates.get(v), "title": paper_info["title"],
+                            "authors": paper_info["authors"], "venue": paper_info["venue"],
+                            "status": status, "reason": reason, "files": files,
+                            "archive_bytes": archive_bytes, "bytes_before": before, "bytes_after": after,
+                        }
+                        vdir.mkdir(parents=True, exist_ok=True)
+                        temporary = checkpoint.with_suffix(".json.tmp")
+                        temporary.write_text(
+                            json.dumps(record, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        temporary.replace(checkpoint)
+                        coverage["crawled_versions"] += 1
+                    except (m1_download.DownloadError, OSError, ValueError, TypeError) as e:
+                        all_ok = False
+                        coverage["failed_versions"] += 1
+                        log(f"[{vid}] ERROR tải source: {e}")
+
+            processed.append((aid, pdir, all_ok))
+
+        # Join the reference response after source work, then write reference
+        # checkpoints for every version without adding another network request.
+        batch_data, seconds_per_paper = reference_future.result()
+        for index, (aid, pdir, all_ok) in enumerate(processed):
+            rec.add_paper_time(aid, seconds_per_paper)
+            if pdir is None:
+                rec.record_result(aid, False)
+                rec.record_references(aid, False)
+                continue
+
+            paper_s2 = batch_data[index]
+            if isinstance(paper_s2, dict):
+                m1_references.write_raw_refs(aid, paper_s2)
             raw_refs = paper_s2.get("references") if isinstance(paper_s2, dict) else None
             if isinstance(raw_refs, list):
                 refs = normalize_references(raw_refs)
@@ -246,32 +305,22 @@ def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corp
             else:
                 refs = []
                 ref_ok = False
-            rec.record_references(aid, ref_ok, len(refs), sum(1 for x in refs if x["ref_arxiv_id"]))
-
-            # --- Từng version
-            for v in range(1, n + 1):
-                vid = f"{aid}v{v}"
+            arxiv_ref_count = sum(1 for x in refs if x["ref_arxiv_id"])
+            rec.record_references(aid, ref_ok, len(refs), arxiv_ref_count)
+            if ref_ok:
+                m1_references.write_refs(aid, refs)
+            for v in range(1, info[aid]["n_versions"] + 1):
                 vdir = pdir / f"v{v}"
-                try:
-                    data = fetch_source(f"https://export.arxiv.org/src/{vid}", user_agent, src_limiter)
-                    kind = extract_tex_bib(data, vdir)
-                    archive_bytes, before, after = inspect_archive_bytes(data, vdir)
-                    no_tex = after == 0
-                    rec.record_paper_size(aid, before, after, archive_bytes, is_pdf_only=no_tex)
-                    (vdir / "metadata.json").write_text(json.dumps({
-                        "arxiv_id": vid, "version": v, "date": dates.get(v), "title": paper_info["title"],
-                        "authors": paper_info["authors"], "venue": paper_info["venue"], "source_kind": kind,
-                        "archive_bytes": archive_bytes, "bytes_before": before, "bytes_after": after,
-                    }, ensure_ascii=False, indent=2), encoding="utf-8")
-                    (vdir / "references.json").write_text(json.dumps(refs, ensure_ascii=False), encoding="utf-8")
-                    coverage["crawled_versions"] += 1
-                except Exception as e:
-                    all_ok = False
-                    coverage["failed_versions"] += 1
-                    log(f"[{vid}] ERROR tải source: {e}")
-
+                if vdir.exists():
+                    (vdir / "references.json").write_text(
+                        json.dumps(refs, ensure_ascii=False), encoding="utf-8"
+                    )
             rec.record_result(aid, all_ok)
-            log(f"[{aid}] versions={n} refs={len(refs)} ref_ok={ref_ok} ok={all_ok}")
+            log(f"[{aid}] versions={info[aid]['n_versions']} refs={len(refs)} "
+                f"ref_ok={ref_ok} ok={all_ok}")
+    finally:
+        if owns_executor:
+            executor.shutdown(wait=True)
 
 
 # ----------------------------------------------------------------------------- main
@@ -285,8 +334,8 @@ def main() -> int:
     args = ap.parse_args()
 
     ids = read_ids(args.ids_file)
-    src_limiter = RateLimiter(3.0)
     session = requests.Session()
+    session.headers.update({"User-Agent": args.user_agent})
     coverage = {"expected_versions": 0, "crawled_versions": 0, "failed_versions": 0, "not_found_papers": 0}
 
     args.corpus_dir.mkdir(parents=True, exist_ok=True)
@@ -297,7 +346,7 @@ def main() -> int:
             for i in range(0, len(ids), args.batch_size):
                 group = ids[i:i + args.batch_size]
                 log(f"\n=== Đang xử lý Batch {i // args.batch_size + 1} ({len(group)} papers) ===")
-                crawl_batch(group, info, rec, args.corpus_dir, args.user_agent, src_limiter, session, coverage)
+                crawl_batch(group, info, rec, args.corpus_dir, session, coverage)
 
     data = rec.save(args.bench_out)
     data["coverage"] = {**coverage,
