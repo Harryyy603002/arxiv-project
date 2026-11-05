@@ -259,6 +259,19 @@ def write_refs(arxiv_id: str, references: list[dict]) -> None:
     temporary.replace(path)
 
 
+def write_raw_refs(arxiv_id: str, payload: dict) -> None:
+    """Write the raw paper response with the citing ID and retrieval envelope."""
+    path = C.raw_refs_path(arxiv_id)
+    C.ensure_dir(path.parent)
+    record = {
+        "arxiv_id": C.split_version(arxiv_id)[0],
+        "response": payload,
+    }
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
 def crawl(ids: list[str], force: bool = False,
           attempts: int = MAX_RETRIES, session: requests.Session | None = None,
           batch_size: int | None = None) -> tuple[int, int]:
@@ -285,6 +298,7 @@ def crawl(ids: list[str], force: bool = False,
                     failed += 1
                     log.warning("%s: Semantic Scholar returned no references", arxiv_id)
                     continue
+                write_raw_refs(arxiv_id, paper)
                 write_refs(arxiv_id, references)
                 written += 1
             log.info("Progress %d/%d | written=%d failed=%d",
@@ -299,6 +313,7 @@ def crawl(ids: list[str], force: bool = False,
             failed += 1
             log.error("%s", error)
             continue
+        write_raw_refs(arxiv_id, {"references": references})
         write_refs(arxiv_id, references)
         written += 1
         log.info("saved %s", C.refs_path(arxiv_id))

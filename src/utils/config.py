@@ -163,6 +163,10 @@ def refs_path(arxiv_id: str) -> Path:
     return paper_dir(arxiv_id) / "refs.json"
 
 
+def raw_refs_path(arxiv_id: str) -> Path:
+    return paper_dir(arxiv_id) / "refs_raw.json"
+
+
 def version_dir(arxiv_id: str, version) -> Path:
     """version: 'v2' hoặc 2."""
     label = version if isinstance(version, str) else f"v{int(version)}"

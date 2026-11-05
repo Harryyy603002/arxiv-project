@@ -295,6 +295,8 @@ def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corp
                 continue
 
             paper_s2 = batch_data[index]
+            if isinstance(paper_s2, dict):
+                m1_references.write_raw_refs(aid, paper_s2)
             raw_refs = paper_s2.get("references") if isinstance(paper_s2, dict) else None
             if isinstance(raw_refs, list):
                 refs = normalize_references(raw_refs)
