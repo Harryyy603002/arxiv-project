@@ -1,6 +1,8 @@
 from parser.m2_bib_dedup import deduplicate_keys, rewrite_citations
 from parser.m2_bibitem import parse_bibtex_entries
 from matching.m3_candidates import generate_candidates, normalize_text
+from run_m2 import process_paper
+import json
 
 
 def test_parse_bibtex_entries_preserves_provenance_and_fields():
@@ -53,3 +55,27 @@ def test_candidate_generation_stays_within_citing_paper_and_keeps_features():
     assert candidates[0]["ref_arxiv_id"] == "9876.54321"
     assert candidates[0]["title_similarity"] == 1.0
     assert normalize_text(r"{A \LaTeX}  Study") == "a latex study"
+
+
+def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
+    paper = tmp_path / "1234-56789"
+    version = paper / "v1"
+    version.mkdir(parents=True)
+    (version / "main.bib").write_text(
+        "@article{first, title={A Study}, author={Doe}, year=2020}\n",
+        encoding="utf-8",
+    )
+    (version / "main.tex").write_text("\\cite{first}\n", encoding="utf-8")
+    (paper / "refs.json").write_text(json.dumps({
+        "arxiv_id": "1234.56789",
+        "references": [{"paperId": "s2", "title": "A Study",
+                        "externalIds": {"ArXiv": "9876.54321"}}],
+    }), encoding="utf-8")
+
+    stats = process_paper(paper)
+
+    assert stats["bibtex_entries_ingested"] == 1
+    assert stats["candidate_pairs"] == 1
+    assert (paper / "bibtex_merged.json").exists()
+    assert (paper / "candidates.json").exists()
+    assert (paper / "m2_stats.json").exists()

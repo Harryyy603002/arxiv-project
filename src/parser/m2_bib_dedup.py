@@ -47,6 +47,8 @@ def deduplicate_keys(entries: list[dict]) -> tuple[list[dict], dict[str, str], l
             " ".join(str(entry.get("author", "")).lower().split()),
             str(entry.get("year", "")),
         )
+        if not any(identity):
+            identity = ("key", entry["citation_key"], "")
         groups[identity].append(entry)
 
     canonical_entries = []
