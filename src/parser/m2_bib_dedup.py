@@ -77,9 +77,10 @@ def deduplicate_keys(entries: list[dict]) -> tuple[list[dict], dict[str, str], l
 _CITE_RE = re.compile(r"\\cite[a-zA-Z*]*\s*\{([^{}]*)\}")
 
 
-def rewrite_citations(text: str, replacements: dict[str, str]) -> str:
-    """Rewrite citation keys without changing commented-out lines."""
+def rewrite_citations_with_count(text: str, replacements: dict[str, str]) -> tuple[str, int]:
+    """Rewrite active citation keys and return the rewritten-key occurrence count."""
     lines = []
+    rewritten_count = 0
     for line in text.splitlines(keepends=True):
         if line.lstrip().startswith("%"):
             lines.append(line)
@@ -88,7 +89,14 @@ def rewrite_citations(text: str, replacements: dict[str, str]) -> str:
         def replace(match: re.Match[str]) -> str:
             keys = [key.strip() for key in match.group(1).split(",")]
             rewritten = [replacements.get(key, key) for key in keys]
+            nonlocal rewritten_count
+            rewritten_count += sum(key in replacements for key in keys)
             return match.group(0).replace(match.group(1), ",".join(rewritten))
 
         lines.append(_CITE_RE.sub(replace, line))
-    return "".join(lines)
+    return "".join(lines), rewritten_count
+
+
+def rewrite_citations(text: str, replacements: dict[str, str]) -> str:
+    """Rewrite citation keys without changing commented-out lines."""
+    return rewrite_citations_with_count(text, replacements)[0]

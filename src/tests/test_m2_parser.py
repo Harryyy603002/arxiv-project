@@ -1,4 +1,8 @@
-from parser.m2_bib_dedup import deduplicate_keys, rewrite_citations
+from parser.m2_bib_dedup import (
+    deduplicate_keys,
+    rewrite_citations,
+    rewrite_citations_with_count,
+)
 from parser.m2_bibitem import parse_bibtex_entries
 from matching.m3_candidates import generate_candidates, normalize_authors, normalize_text
 from run_m2 import process_paper
@@ -40,6 +44,11 @@ def test_deduplicate_keys_merges_fields_and_rewrites_only_active_citations():
     assert rewrite_citations("\\cite{first, second}\n% \\cite{second}\n", replacements) == (
         "\\cite{first,first}\n% \\cite{second}\n"
     )
+    rewritten, count = rewrite_citations_with_count(
+        "\\cite{first, second}\n% \\cite{second}\n", replacements
+    )
+    assert rewritten.startswith("\\cite{first,first}")
+    assert count == 1
 
 
 def test_candidate_generation_stays_within_citing_paper_and_keeps_features():
@@ -74,6 +83,10 @@ def test_normalization_handles_accents_latex_and_author_forms():
     assert normalize_authors([{"name": "Jane Doe"}, {"name": "García Márquez"}]) == (
         "jane doe garcia marquez"
     )
+    assert generate_candidates(
+        [{"arxiv_id": "1234.56789", "citation_key": "empty", "title": ""}],
+        [{"ref_s2_id": "s2", "ref_title": ""}],
+    ) == []
 
 
 def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
@@ -100,5 +113,12 @@ def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
     assert stats["candidate_count_max"] == 1
     assert (paper / "bibtex_merged.json").exists()
     assert (paper / "bibtex_entries_raw.json").exists()
+    assert (paper / "citation_key_replacements.json").exists()
+    assert (paper / "candidate_entry_index.json").exists()
+    assert stats["bibtex_entries_with_title"] == 1
+    assert stats["bibtex_entries_with_authors"] == 1
+    assert stats["duplicate_bibtex_entries"] == 0
+    assert stats["zero_candidate_percentage"] == 0.0
+    assert stats["candidate_generation_skipped"] == 0
     assert (paper / "candidates.json").exists()
     assert (paper / "m2_stats.json").exists()

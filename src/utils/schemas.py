@@ -18,6 +18,7 @@ CANDIDATE_FIELDS = (
     "citation_key",
     "ref_s2_id",
     "ref_arxiv_id",
+    "reference_index",
     "title_similarity",
     "author_similarity",
     "bib_title",
@@ -44,7 +45,12 @@ def validate_reference_rows(rows: list[dict]) -> None:
 
 def validate_candidate_rows(rows: list[dict]) -> None:
     validate_rows(rows, CANDIDATE_FIELDS)
+    candidate_ids = [row["candidate_id"] for row in rows]
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise ValueError("candidate IDs must be unique")
     for index, row in enumerate(rows):
+        if not row["candidate_id"]:
+            raise ValueError(f"candidate row {index} has an empty candidate_id")
         for field in ("title_similarity", "author_similarity"):
             if not 0 <= float(row[field]) <= 1:
                 raise ValueError(f"candidate row {index} has invalid {field}")
