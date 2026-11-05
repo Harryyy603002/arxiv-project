@@ -61,9 +61,11 @@ def test_batch_crawl_writes_and_skips_cached_results(tmp_path, monkeypatch):
     assert json.loads(C.refs_path("2606.20734").read_text()) == {
         "arxiv_id": "2606.20734", "references": papers[0]["references"]
     }
-    assert json.loads(C.raw_refs_path("2606.20734").read_text()) == {
-        "arxiv_id": "2606.20734", "response": papers[0]
-    }
+    raw_record = json.loads(C.raw_refs_path("2606.20734").read_text())
+    assert raw_record["arxiv_id"] == "2606.20734"
+    assert raw_record["response"] == papers[0]
+    assert raw_record["endpoint"].endswith("2606.20734")
+    assert raw_record["retrieved_at"]
 
     assert R.crawl(
         ["2606.20734", "2606.20735"], attempts=1, session=session, batch_size=25
@@ -86,6 +88,25 @@ def test_batch_crawl_splits_rejected_group(tmp_path, monkeypatch):
     ) == (2, 0)
     assert len(session.calls) == 3
     assert all(C.refs_path(arxiv_id).exists() for arxiv_id in ["2606.20734", "2606.20735"])
+
+
+def test_invalid_reference_shape_is_rejected_without_writing(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
+    session = FakeSession([FakeResponse(200, [{"references": None}])])
+
+    assert R.crawl(["2606.20734"], attempts=1, session=session, batch_size=25) == (0, 1)
+    assert not C.refs_path("2606.20734").exists()
+    assert not C.raw_refs_path("2606.20734").exists()
+
+
+def test_raw_checkpoint_is_required_for_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
+    C.ensure_dir(C.paper_dir("2606.20734"))
+    C.refs_path("2606.20734").write_text("{}", encoding="utf-8")
+    session = FakeSession([FakeResponse(200, [{"references": []}])])
+
+    assert R.crawl(["2606.20734"], attempts=1, session=session, batch_size=25) == (1, 0)
+    assert C.raw_refs_path("2606.20734").exists()
 
 
 def test_run_m1_fetches_references_in_batches(tmp_path, monkeypatch):

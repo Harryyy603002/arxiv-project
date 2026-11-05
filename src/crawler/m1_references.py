@@ -20,6 +20,7 @@ Chống rate limit (HTTP 429):
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import logging
 import sys
@@ -265,11 +266,26 @@ def write_raw_refs(arxiv_id: str, payload: dict) -> None:
     C.ensure_dir(path.parent)
     record = {
         "arxiv_id": C.split_version(arxiv_id)[0],
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "endpoint": C.S2_API_URL.format(arxiv_id=C.split_version(arxiv_id)[0]),
         "response": payload,
     }
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+def validate_reference_payload(payload: object) -> list:
+    """Validate the API response shape without discarding incomplete references."""
+    if not isinstance(payload, dict):
+        raise ReferenceCrawlError("response is not an object")
+    references = payload.get("references")
+    if not isinstance(references, list):
+        raise ReferenceCrawlError("response has no references list")
+    for index, reference in enumerate(references):
+        if not isinstance(reference, dict):
+            raise ReferenceCrawlError(f"reference {index} is not an object")
+    return references
 
 
 def crawl(ids: list[str], force: bool = False,
@@ -279,7 +295,10 @@ def crawl(ids: list[str], force: bool = False,
     client = session or requests.Session()
     todo = list(dict.fromkeys(C.split_version(arxiv_id)[0] for arxiv_id in ids))
     if not force:
-        todo = [arxiv_id for arxiv_id in todo if not C.refs_path(arxiv_id).exists()]
+        todo = [
+            arxiv_id for arxiv_id in todo
+            if not C.refs_path(arxiv_id).exists() or not C.raw_refs_path(arxiv_id).exists()
+        ]
     log.info("Need to crawl %d papers", len(todo))
 
     if batch_size:
@@ -293,10 +312,11 @@ def crawl(ids: list[str], force: bool = False,
                 log.error("batch %d-%d failed: %s", offset + 1, offset + len(group), error)
                 continue
             for arxiv_id, paper in zip(group, papers):
-                references = paper.get("references") if isinstance(paper, dict) else None
-                if not isinstance(references, list):
+                try:
+                    references = validate_reference_payload(paper)
+                except ReferenceCrawlError as error:
                     failed += 1
-                    log.warning("%s: Semantic Scholar returned no references", arxiv_id)
+                    log.warning("%s: invalid Semantic Scholar response: %s", arxiv_id, error)
                     continue
                 write_raw_refs(arxiv_id, paper)
                 write_refs(arxiv_id, references)

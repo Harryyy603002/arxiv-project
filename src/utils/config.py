@@ -167,6 +167,10 @@ def raw_refs_path(arxiv_id: str) -> Path:
     return paper_dir(arxiv_id) / "refs_raw.json"
 
 
+def references_table_path() -> Path:
+    return DATA_DIR / "references.jsonl"
+
+
 def version_dir(arxiv_id: str, version) -> Path:
     """version: 'v2' hoặc 2."""
     label = version if isinstance(version, str) else f"v{int(version)}"
