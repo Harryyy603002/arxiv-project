@@ -61,6 +61,21 @@ class ReferenceCrawlError(Exception):
     """Semantic Scholar did not return references after the retry budget."""
 
 
+def record_failure(arxiv_id: str, attempts: int, error: Exception | str,
+                   category: str) -> None:
+    """Append a structured failure record without exposing request headers."""
+    C.ensure_dir(C.refs_failures_path().parent)
+    record = {
+        "arxiv_id": C.normalize_arxiv_id(arxiv_id),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "attempts": attempts,
+        "category": category,
+        "error": str(error),
+    }
+    with C.refs_failures_path().open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def polite_wait() -> None:
     """Keep requests at least C.S2_DELAY_SECONDS (+ giãn cách thích ứng) apart."""
     gap = C.S2_DELAY_SECONDS + _extra_delay
@@ -296,7 +311,7 @@ PUBLISHED_REFERENCE_FIELDS = (
 )
 
 
-def _reference_row(citing_id: str, reference: dict) -> dict:
+def normalize_reference(citing_id: str, reference: dict) -> dict:
     external_ids = reference.get("externalIds")
     if not isinstance(external_ids, dict):
         external_ids = reference.get("external_ids")
@@ -310,8 +325,10 @@ def _reference_row(citing_id: str, reference: dict) -> dict:
             for author in authors
         ]
     return {
-        "arxiv_id": citing_id,
-        "ref_arxiv_id": reference.get("ref_arxiv_id") or external_ids.get("ArXiv"),
+        "arxiv_id": C.normalize_arxiv_id(citing_id),
+        "ref_arxiv_id": C.normalize_arxiv_id(
+            reference.get("ref_arxiv_id") or external_ids.get("ArXiv")
+        ),
         "ref_title": reference.get("ref_title") or reference.get("title"),
         "ref_authors": authors or [],
         "ref_submission_date": (
@@ -337,7 +354,7 @@ def build_published_references() -> dict[str, int]:
             if not isinstance(reference, dict):
                 continue
             total += 1
-            row = _reference_row(citing_id, reference)
+            row = normalize_reference(citing_id, reference)
             if row["ref_arxiv_id"]:
                 with_arxiv_id += 1
                 rows.append(row)
@@ -390,6 +407,8 @@ def crawl(ids: list[str], force: bool = False,
                 papers = fetch_batch_group(client, group, attempts)
             except ReferenceCrawlError as error:
                 failed += len(group)
+                for arxiv_id in group:
+                    record_failure(arxiv_id, attempts, error, "request_failure")
                 log.error("batch %d-%d failed: %s", offset + 1, offset + len(group), error)
                 continue
             for arxiv_id, paper in zip(group, papers):
@@ -397,6 +416,7 @@ def crawl(ids: list[str], force: bool = False,
                     references = validate_reference_payload(paper)
                 except ReferenceCrawlError as error:
                     failed += 1
+                    record_failure(arxiv_id, 0, error, "invalid_response")
                     log.warning("%s: invalid Semantic Scholar response: %s", arxiv_id, error)
                     continue
                 write_raw_refs(arxiv_id, paper)
@@ -412,6 +432,7 @@ def crawl(ids: list[str], force: bool = False,
             references = fetch_references(client, arxiv_id, attempts)
         except ReferenceCrawlError as error:
             failed += 1
+            record_failure(arxiv_id, attempts, error, "request_failure")
             log.error("%s", error)
             continue
         write_raw_refs(arxiv_id, {"references": references})

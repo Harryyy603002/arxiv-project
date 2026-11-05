@@ -135,6 +135,29 @@ def test_published_references_export_filters_arxiv_targets(tmp_path, monkeypatch
     assert "1234.56789" in lines[1]
 
 
+def test_reference_ids_are_normalized_without_changing_raw_payload():
+    row = R.normalize_reference("https://arxiv.org/abs/2606.20734v2", {
+        "externalIds": {"ArXiv": "arXiv:hep-th/9901001v3"},
+        "title": "Reference",
+    })
+
+    assert row["arxiv_id"] == "2606.20734"
+    assert row["ref_arxiv_id"] == "hep-th/9901001"
+
+
+def test_failed_batch_requests_write_structured_failure_records(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
+    session = FakeSession([FakeResponse(500, {})])
+
+    assert R.crawl(["2606.20734"], attempts=1, session=session, batch_size=25) == (0, 1)
+
+    record = json.loads(C.refs_failures_path().read_text(encoding="utf-8").splitlines()[0])
+    assert record["arxiv_id"] == "2606.20734"
+    assert record["attempts"] == 1
+    assert record["category"] == "request_failure"
+    assert "x-api-key" not in record["error"].lower()
+
+
 def test_published_reference_schema_rejects_empty_identifiers():
     with pytest.raises(ValueError, match="empty identifier"):
         validate_reference_rows([{
