@@ -16,6 +16,7 @@ Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa t
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -28,6 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils.config import DATA_DIR, paper_dir, version_dir  # noqa: E402, F401
 
 # 1. ĐỊNH NGHĨA PYARROW SCHEMA CHO 6 BẢNG
+# Kiểu cột theo bảng "Dataset tables" trong đề M1/M2; "dictionary" = mã hóa từ điển của Parquet.
+DICT_STRING = pa.dictionary(pa.int32(), pa.string())
 
 # Milestone 1
 PAPERS_SCHEMA = pa.schema([
@@ -52,24 +55,24 @@ REFERENCES_SCHEMA = pa.schema([
 ELEMENTS_SCHEMA = pa.schema([
     pa.field("element_id", pa.string(), nullable=False),
     pa.field("arxiv_id", pa.string(), nullable=False),
-    pa.field("kind", pa.string(), nullable=False),
+    pa.field("kind", DICT_STRING, nullable=False),
     pa.field("content", pa.string(), nullable=True),
 ])
 
 HIERARCHY_SCHEMA = pa.schema([
     pa.field("arxiv_id", pa.string(), nullable=False),
-    pa.field("version", pa.string(), nullable=False),
+    pa.field("version", pa.int32(), nullable=False),
     pa.field("element_id", pa.string(), nullable=False),
-    pa.field("parent_id", pa.string(), nullable=True),
+    pa.field("parent_id", pa.string(), nullable=False),
 ])
 
 BIBTEX_SCHEMA = pa.schema([
     pa.field("arxiv_id", pa.string(), nullable=False),
     pa.field("citation_key", pa.string(), nullable=False),
-    pa.field("entry_type", pa.string(), nullable=True),
+    pa.field("entry_type", DICT_STRING, nullable=True),
     pa.field("title", pa.string(), nullable=True),
     pa.field("authors", pa.list_(pa.string()), nullable=True),
-    pa.field("year", pa.string(), nullable=True),
+    pa.field("year", pa.int32(), nullable=True),
     pa.field("doi", pa.string(), nullable=True),
     pa.field("journal", pa.string(), nullable=True),
     pa.field("url", pa.string(), nullable=True),
@@ -94,10 +97,40 @@ ALL_SCHEMAS: Dict[str, pa.Schema] = {
 
 # 2. KIỂM TRA TOÀN VẸN DỮ LIỆU & XUẤT PARQUET
 
+def _parse_version(value):
+    """'v2' -> 2, 2 -> 2; giá trị không đọc được -> None."""
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    m = re.search(r"\d+", str(value))
+    return int(m.group()) if m else None
+
+
+def _parse_year(value):
+    """'2020' -> 2020, '2020a' -> 2020, 2020 -> 2020; giá trị không đọc được -> None."""
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    m = re.search(r"(?<!\d)(\d{4})(?!\d)", str(value))
+    return int(m.group(1)) if m else None
+
+
 def to_arrow_table(df: pd.DataFrame, table_name: str) -> pa.Table:
-    """Ép kiểu DataFrame theo đúng PyArrow Schema của bảng."""
+    """Ép kiểu DataFrame theo đúng PyArrow Schema của bảng.
+
+    Cột int (hierarchy.version, bibtex.year) được đọc từ chuỗi như 'v1' hoặc '2020'.
+    """
     schema = ALL_SCHEMAS[table_name]
     aligned = df.reindex(columns=schema.names)
+    if table_name == "hierarchy":
+        aligned["version"] = aligned["version"].map(_parse_version).astype("Int32")
+    elif table_name == "bibtex":
+        aligned["year"] = aligned["year"].map(_parse_year).astype("Int32")
+    # Cột bị thiếu được reindex thành NaN (float64), mà pyarrow không đổi được float64 sang dictionary
+    # hay list; ép các cột đó về object (giá trị hoặc None) trước khi chuyển.
+    for field in schema:
+        col = aligned[field.name]
+        is_numeric_field = pa.types.is_integer(field.type) or pa.types.is_floating(field.type)
+        if pa.types.is_dictionary(field.type) or (col.dtype.kind == "f" and not is_numeric_field):
+            aligned[field.name] = col.astype(object).where(col.notna(), None)
     return pa.Table.from_pandas(aligned, schema=schema, preserve_index=False)
 
 
@@ -173,6 +206,11 @@ def export_m2_parquet(corpus_dir: Path | None = None, out_dir: Path | None = Non
 
     el_df = pd.DataFrame(el_rows, columns=ELEMENTS_SCHEMA.names)
     hier_df = pd.DataFrame(hier_rows, columns=HIERARCHY_SCHEMA.names)
+    # Đề: parent_id non-null, nút gốc không có cạnh trong bảng hierarchy -> bỏ cạnh có parent_id rỗng.
+    n_root_edges = int(hier_df["parent_id"].isna().sum())
+    if n_root_edges:
+        hier_df = hier_df.dropna(subset=["parent_id"])
+        print(f"[INFO] Bỏ {n_root_edges} cạnh nút gốc (parent_id rỗng) khỏi bảng hierarchy.")
     bib_df = pd.DataFrame(bib_rows, columns=BIBTEX_SCHEMA.names)
 
     errors = validate_m2_integrity(el_df, hier_df, bib_df)
@@ -251,9 +289,8 @@ def main() -> None:
         {"element_id": "el_3", "arxiv_id": "1706.03762", "kind": "paragraph", "content": "We follow \\cite{vaswani2017}."},
     ])
     sample_hierarchy = pd.DataFrame([
-        {"arxiv_id": "1706.03762", "version": "v1", "element_id": "el_1", "parent_id": None},
         {"arxiv_id": "1706.03762", "version": "v1", "element_id": "el_2", "parent_id": "el_1"},
-        {"arxiv_id": "1706.03762", "version": "v1", "element_id": "el_3", "parent_id": "el_2"},
+        {"arxiv_id": "1706.03762", "version": 1, "element_id": "el_3", "parent_id": "el_2"},
     ])
     sample_bibtex = pd.DataFrame([
         {

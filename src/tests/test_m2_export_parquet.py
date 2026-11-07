@@ -63,7 +63,7 @@ def test_export_writes_three_tables_with_exact_schema(corpus, tmp_path):
 
     counts = S.export_m2_parquet(corpus_dir=corpus, out_dir=out)
 
-    assert counts == {"elements": 7, "hierarchy": 7, "bibtex": 2}
+    assert counts == {"elements": 7, "hierarchy": 5, "bibtex": 2}
     for name in ("elements", "hierarchy", "bibtex"):
         assert pq.read_table(out / f"{name}.parquet").schema.equals(S.ALL_SCHEMAS[name])
 
@@ -79,7 +79,8 @@ def test_export_roundtrips_lists_nulls_and_cite_commands(corpus, tmp_path):
     sentence = elements[elements["element_id"] == "2310-12345#s0"].iloc[0]
     assert "\\cite{vaswani2017}" in sentence["content"]
     hierarchy = pq.read_table(tmp_path / "hierarchy.parquet").to_pandas()
-    assert pd.isna(hierarchy[hierarchy["element_id"] == "2310-12345#root"].iloc[0]["parent_id"])
+    assert "2310-12345#root" not in set(hierarchy["element_id"])
+    assert hierarchy["parent_id"].notna().all()
 
 
 def test_export_twice_overwrites_instead_of_duplicating(corpus, tmp_path):
@@ -111,7 +112,34 @@ def test_export_skips_corrupt_json_non_list_and_loose_files(corpus, tmp_path):
 
     counts = S.export_m2_parquet(corpus_dir=corpus, out_dir=tmp_path / "export")
 
-    assert counts == {"elements": 7, "hierarchy": 7, "bibtex": 2}
+    assert counts == {"elements": 7, "hierarchy": 5, "bibtex": 2}
+
+
+def test_export_drops_root_edges_and_reports_them(corpus, tmp_path, capsys):
+    S.export_m2_parquet(corpus_dir=corpus, out_dir=tmp_path / "export")
+
+    assert "[INFO] Bỏ 2 cạnh nút gốc" in capsys.readouterr().out
+
+
+def test_hierarchy_version_and_bibtex_year_are_ints(tmp_path):
+    hierarchy = pd.DataFrame([
+        {"arxiv_id": "1", "version": "v2", "element_id": "e", "parent_id": "p"},
+        {"arxiv_id": "1", "version": 3, "element_id": "f", "parent_id": "p"},
+    ])
+    bibtex = pd.DataFrame([
+        {"arxiv_id": "1", "citation_key": "a", "year": "2020"},
+        {"arxiv_id": "1", "citation_key": "b", "year": "2019a"},
+        {"arxiv_id": "1", "citation_key": "c", "year": None},
+        {"arxiv_id": "1", "citation_key": "d", "year": "n.d."},
+    ])
+
+    assert S.to_arrow_table(hierarchy, "hierarchy").column("version").to_pylist() == [2, 3]
+    assert S.to_arrow_table(bibtex, "bibtex").column("year").to_pylist() == [2020, 2019, None, None]
+
+
+def test_kind_and_entry_type_are_dictionary_columns():
+    assert S.ELEMENTS_SCHEMA.field("kind").type == S.DICT_STRING
+    assert S.BIBTEX_SCHEMA.field("entry_type").type == S.DICT_STRING
 
 
 def test_export_warns_about_orphan_hierarchy_edges(corpus, tmp_path, capsys):
