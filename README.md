@@ -76,6 +76,8 @@ data/
 ├── papers.csv, papers.parquet          # bảng papers gộp
 ├── references.csv, references.parquet  # bảng references gộp (chỉ giữ ref có arXiv ID)
 ├── failed_ids.txt                      # ID không tồn tại / lỗi (không phải bug)
+├── refs_failures.jsonl                 # lỗi Semantic Scholar có cấu trúc, dùng để chạy lại
+├── references_crawl_stats.json         # thống kê attempted/skipped/success/failed/duration
 ├── benchmark_m1.json                   # kết quả đo hiệu năng M1 (không commit)
 ├── labels/
 │   ├── manual_labels.csv
@@ -92,6 +94,22 @@ data/
             ├── references.json         # TOÀN BỘ reference crawl từ Semantic Scholar
             └── tree_raw.json           # cây thô, text chưa làm sạch (Phục vụ M2/M3)
 ```
+
+M1 reference crawling also stores the complete Semantic Scholar response separately
+as `<paper_key>/refs_raw.json`. The normalized local references remain in
+the integrated version files and the canonical paper-level `refs.json` are
+derived from the same normalizer; the standalone crawler keeps the response
+references in `refs.json` for backward-compatible resume behavior. arXiv identifiers are normalized by
+removing URL/`arXiv:` prefixes and version suffixes while raw responses retain
+the original values. Only rows with a usable `ref_arxiv_id` are exported to
+`data/references.csv` by `crawler.m1_references.build_published_references()`.
+The export writes `data/references_stats.json` with the raw/local and published
+row counts, including duplicate local rows removed from the published table.
+Failed Semantic Scholar batches and malformed responses are
+appended to `data/refs_failures.jsonl` with the citing ID, timestamp, attempt
+count, category, and error text; request headers are never written.
+Each standalone reference crawl also writes `data/references_crawl_stats.json`
+with requested, attempted, skipped, successful, failed, and duration fields.
 
 Version chỉ có PDF vẫn phải có thư mục `vN/` (rỗng). M2 coi đó là bản rỗng và tính vào thống kê, không được bỏ qua.
 
@@ -221,6 +239,24 @@ Kiểm thử: `pytest src/tests` (đã có `pytest.ini` đặt `pythonpath = src
 
 Kết quả đo hiệu năng nằm ở `data/benchmark_m1.json` sau khi chạy kịch bản `run_m1.py`. Chỉ số bao gồm: thời gian từng giai đoạn, RAM tối đa/trung bình, đỉnh đĩa tối đa, dung lượng đầu ra thực tế. 
 Có thể đo thêm end-to-end bên ngoài bằng `benchmark.py` (tùy chọn).
+
+### Chạy M2
+
+Sau khi M1 đã tạo các thư mục `corpus/<paper_key>/vN/` có file `.bib`, chạy:
+
+```bash
+python src/run_m2.py
+```
+
+M2 tạo `bibtex_entries_raw.json`, `bibtex_merged.json`, `citation_key_replacements.json`,
+`candidate_entry_index.json`, `candidates.json`, và `m2_stats.json` trong từng
+thư mục bài. Các file được ghi atomically để có thể chạy lại an toàn; citation
+keys trùng được gộp theo normalized title/author/year và các lệnh `\cite{...}` đang hoạt
+động được cập nhật theo khóa canonical. Candidate rows giữ trường gốc và
+normalized cho title/author, cùng feature exact-title và fuzzy similarity;
+`m2_stats.json` có thống kê candidate theo từng entry, zero-candidate entries,
+skip reasons, timings, and exact/fuzzy totals. `candidate_entry_index.json`
+keeps zero-candidate BibTeX entries visible for annotation preparation.
 
 ## 8. Tài liệu nhãn và feature (M3)
 

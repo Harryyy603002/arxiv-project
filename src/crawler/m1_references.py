@@ -20,6 +20,8 @@ Chống rate limit (HTTP 429):
 from __future__ import annotations
 
 import argparse
+import csv
+from datetime import datetime, timezone
 import json
 import logging
 import sys
@@ -30,6 +32,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils import config as C  # noqa: E402
+from utils.schemas import validate_reference_rows
 
 log = logging.getLogger("m1_references")
 
@@ -56,6 +59,21 @@ _warned_no_key = False
 
 class ReferenceCrawlError(Exception):
     """Semantic Scholar did not return references after the retry budget."""
+
+
+def record_failure(arxiv_id: str, attempts: int, error: Exception | str,
+                   category: str) -> None:
+    """Append a structured failure record without exposing request headers."""
+    C.ensure_dir(C.refs_failures_path().parent)
+    record = {
+        "arxiv_id": C.normalize_arxiv_id(arxiv_id),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "attempts": attempts,
+        "category": category,
+        "error": str(error),
+    }
+    with C.refs_failures_path().open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def polite_wait() -> None:
@@ -259,14 +277,167 @@ def write_refs(arxiv_id: str, references: list[dict]) -> None:
     temporary.replace(path)
 
 
+def write_raw_refs(arxiv_id: str, payload: dict) -> None:
+    """Write the raw paper response with the citing ID and retrieval envelope."""
+    path = C.raw_refs_path(arxiv_id)
+    C.ensure_dir(path.parent)
+    record = {
+        "arxiv_id": C.split_version(arxiv_id)[0],
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "endpoint": C.S2_API_URL.format(arxiv_id=C.split_version(arxiv_id)[0]),
+        "response": payload,
+    }
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def validate_reference_payload(payload: object) -> list:
+    """Validate the API response shape without discarding incomplete references."""
+    if not isinstance(payload, dict):
+        raise ReferenceCrawlError("response is not an object")
+    references = payload.get("references")
+    if not isinstance(references, list):
+        raise ReferenceCrawlError("response has no references list")
+    for index, reference in enumerate(references):
+        if not isinstance(reference, dict):
+            raise ReferenceCrawlError(f"reference {index} is not an object")
+    return references
+
+
+PUBLISHED_REFERENCE_FIELDS = (
+    "arxiv_id", "ref_arxiv_id", "ref_title", "ref_authors",
+    "ref_submission_date", "ref_venue", "ref_s2_id", "external_ids",
+)
+
+
+def normalize_reference(citing_id: str, reference: dict) -> dict:
+    external_ids = reference.get("externalIds")
+    if not isinstance(external_ids, dict):
+        external_ids = reference.get("external_ids")
+    external_ids = external_ids if isinstance(external_ids, dict) else {}
+    authors = reference.get("authors")
+    if authors is None:
+        authors = reference.get("ref_authors")
+    if isinstance(authors, list):
+        authors = [
+            author.get("name", "") if isinstance(author, dict) else str(author)
+            for author in authors
+        ]
+    return {
+        "arxiv_id": C.normalize_arxiv_id(citing_id),
+        "ref_arxiv_id": C.normalize_arxiv_id(
+            reference.get("ref_arxiv_id") or external_ids.get("ArXiv")
+        ),
+        "ref_title": reference.get("ref_title") or reference.get("title"),
+        "ref_authors": authors or [],
+        "ref_submission_date": (
+            reference.get("ref_submission_date")
+            or reference.get("publicationDate")
+            or (str(reference["year"]) if reference.get("year") else None)
+        ),
+        "ref_venue": reference.get("ref_venue") or reference.get("venue"),
+        "ref_s2_id": reference.get("ref_s2_id") or reference.get("paperId"),
+        "external_ids": external_ids,
+    }
+
+
+def deduplicate_references(rows: list[dict]) -> tuple[list[dict], int]:
+    """Keep the first occurrence of each reference identity deterministically."""
+    unique = []
+    seen = set()
+    duplicates = 0
+    for row in rows:
+        identity = (
+            row.get("ref_s2_id")
+            or row.get("ref_arxiv_id")
+            or (
+                str(row.get("ref_title") or "").strip().casefold(),
+                tuple(str(author).strip().casefold()
+                      for author in row.get("ref_authors") or []),
+                row.get("ref_submission_date"),
+            )
+        )
+        if identity in seen:
+            duplicates += 1
+            continue
+        seen.add(identity)
+        unique.append(row)
+    return unique, duplicates
+
+
+def build_published_references() -> dict[str, int]:
+    """Export arXiv-linked references and report reproducible filter counts."""
+    rows = []
+    total = 0
+    with_arxiv_id = 0
+    duplicate_rows = 0
+    for refs_path in sorted(C.DATA_DIR.glob("*/refs.json")):
+        payload = json.loads(refs_path.read_text(encoding="utf-8"))
+        citing_id = payload.get("arxiv_id")
+        normalized = []
+        for reference in payload.get("references", []):
+            if not isinstance(reference, dict):
+                continue
+            total += 1
+            normalized.append(normalize_reference(citing_id, reference))
+        normalized, duplicates = deduplicate_references(normalized)
+        duplicate_rows += duplicates
+        for row in normalized:
+            if row["ref_arxiv_id"]:
+                with_arxiv_id += 1
+                rows.append(row)
+
+    output = C.references_csv_path()
+    C.ensure_dir(output.parent)
+    validate_reference_rows(rows)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PUBLISHED_REFERENCE_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                **row,
+                "ref_authors": json.dumps(row["ref_authors"], ensure_ascii=False),
+                "external_ids": json.dumps(row["external_ids"], ensure_ascii=False),
+            })
+    temporary.replace(output)
+    stats = {
+        "total_local_references": total,
+        "references_with_arxiv_id": with_arxiv_id,
+        "references_without_arxiv_id": total - with_arxiv_id,
+        "published_rows": len(rows),
+        "duplicate_rows": duplicate_rows,
+    }
+    C.ensure_dir(C.DATA_DIR)
+    (C.DATA_DIR / "references_stats.json").write_text(
+        json.dumps(stats, indent=2), encoding="utf-8"
+    )
+    return stats
+
+
+def _write_crawl_stats(stats: dict[str, int | float]) -> None:
+    C.ensure_dir(C.DATA_DIR)
+    path = C.DATA_DIR / "references_crawl_stats.json"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
 def crawl(ids: list[str], force: bool = False,
           attempts: int = MAX_RETRIES, session: requests.Session | None = None,
           batch_size: int | None = None) -> tuple[int, int]:
     """Crawl IDs and return ``(written, failed)`` without persisting failed requests."""
+    started = time.monotonic()
     client = session or requests.Session()
     todo = list(dict.fromkeys(C.split_version(arxiv_id)[0] for arxiv_id in ids))
+    requested = len(todo)
     if not force:
-        todo = [arxiv_id for arxiv_id in todo if not C.refs_path(arxiv_id).exists()]
+        todo = [
+            arxiv_id for arxiv_id in todo
+            if not C.refs_path(arxiv_id).exists() or not C.raw_refs_path(arxiv_id).exists()
+        ]
+    skipped = requested - len(todo)
     log.info("Need to crawl %d papers", len(todo))
 
     if batch_size:
@@ -277,18 +448,31 @@ def crawl(ids: list[str], force: bool = False,
                 papers = fetch_batch_group(client, group, attempts)
             except ReferenceCrawlError as error:
                 failed += len(group)
+                for arxiv_id in group:
+                    record_failure(arxiv_id, attempts, error, "request_failure")
                 log.error("batch %d-%d failed: %s", offset + 1, offset + len(group), error)
                 continue
             for arxiv_id, paper in zip(group, papers):
-                references = paper.get("references") if isinstance(paper, dict) else None
-                if not isinstance(references, list):
+                try:
+                    references = validate_reference_payload(paper)
+                except ReferenceCrawlError as error:
                     failed += 1
-                    log.warning("%s: Semantic Scholar returned no references", arxiv_id)
+                    record_failure(arxiv_id, 0, error, "invalid_response")
+                    log.warning("%s: invalid Semantic Scholar response: %s", arxiv_id, error)
                     continue
+                write_raw_refs(arxiv_id, paper)
                 write_refs(arxiv_id, references)
                 written += 1
             log.info("Progress %d/%d | written=%d failed=%d",
                      min(offset + len(group), len(todo)), len(todo), written, failed)
+        _write_crawl_stats({
+            "requested": requested,
+            "attempted": len(todo),
+            "skipped": skipped,
+            "successful": written,
+            "failed": failed,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        })
         return written, failed
 
     written = failed = 0
@@ -297,11 +481,21 @@ def crawl(ids: list[str], force: bool = False,
             references = fetch_references(client, arxiv_id, attempts)
         except ReferenceCrawlError as error:
             failed += 1
+            record_failure(arxiv_id, attempts, error, "request_failure")
             log.error("%s", error)
             continue
+        write_raw_refs(arxiv_id, {"references": references})
         write_refs(arxiv_id, references)
         written += 1
         log.info("saved %s", C.refs_path(arxiv_id))
+    _write_crawl_stats({
+        "requested": requested,
+        "attempted": len(todo),
+        "skipped": skipped,
+        "successful": written,
+        "failed": failed,
+        "duration_seconds": round(time.monotonic() - started, 3),
+    })
     return written, failed
 
 
