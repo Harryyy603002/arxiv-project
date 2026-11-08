@@ -1,22 +1,162 @@
-r"""run_m2.py
+"""Run the deterministic M2 BibTeX and candidate pipeline."""
 
-Milestone: M2
-Người phụ trách: P4
-Mục đích: Chạy toàn bộ pipeline M2 theo thứ tự
+from __future__ import annotations
 
-Đầu vào: Dữ liệu M1 trong data/
-Đầu ra:  Dữ liệu M2 trong data/
+import json
+import statistics
+import time
+from pathlib import Path
 
-Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
-Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
-"""
+from matching.m3_candidates import generate_candidates, normalize_authors, normalize_text
+from parser.m2_bib_dedup import (
+    deduplicate_keys,
+    rewrite_citations_with_count,
+)
+from parser.m2_bibitem import parse_bibtex_entries
+from utils import config as C
+from utils.schemas import validate_candidate_rows
 
-from utils.config import DATA_DIR, paper_dir, version_dir  # noqa: F401
+
+def _corpus_dir() -> Path:
+    candidate = C.DATA_DIR / "corpus"
+    return candidate if candidate.exists() else C.DATA_DIR
 
 
-def main():
-    # TODO(P4): viết code ở đây
-    raise NotImplementedError
+def _atomic_json(path: Path, payload: object) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _load_references(paper_dir: Path) -> list[dict]:
+    path = paper_dir / "refs.json"
+    if path.exists():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload.get("references", []) if isinstance(payload, dict) else []
+    version_path = next(iter(sorted(paper_dir.glob("v*/references.json"))), None)
+    if version_path is None:
+        return []
+    payload = json.loads(version_path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, list) else []
+
+
+def process_paper(paper_dir: Path) -> dict:
+    """Process one paper directory and return auditable M2 counts."""
+    started = time.perf_counter()
+    entries = []
+    parse_started = time.perf_counter()
+    bib_files = sorted(paper_dir.glob("v*/*.bib"))
+    for bib_file in bib_files:
+        version_text = bib_file.parent.name.removeprefix("v")
+        version = int(version_text) if version_text.isdigit() else None
+        entries.extend(parse_bibtex_entries(
+            bib_file.read_text(encoding="utf-8", errors="replace"),
+            paper_dir.name,
+            version,
+        ))
+
+    merged, replacements, conflicts = deduplicate_keys(entries)
+    dedup_seconds = time.perf_counter() - parse_started
+    _atomic_json(paper_dir / "bibtex_entries_raw.json", entries)
+    citation_occurrences = 0
+    for tex_file in sorted(paper_dir.glob("v*/*.tex")):
+        text = tex_file.read_text(encoding="utf-8", errors="replace")
+        rewritten, rewritten_count = rewrite_citations_with_count(text, replacements)
+        citation_occurrences += rewritten_count
+        if rewritten != text:
+            tex_file.write_text(rewritten, encoding="utf-8")
+
+    _atomic_json(paper_dir / "citation_key_replacements.json", replacements)
+    references = _load_references(paper_dir)
+    candidate_started = time.perf_counter()
+    candidate_diagnostics: dict[str, int] = {}
+    candidates = generate_candidates(merged, references, diagnostics=candidate_diagnostics)
+    validate_candidate_rows(candidates)
+    candidate_seconds = time.perf_counter() - candidate_started
+    candidates_per_entry = {
+        entry.get("citation_key"): sum(
+            candidate["citation_key"] == entry.get("citation_key")
+            for candidate in candidates
+        )
+        for entry in merged
+    }
+    candidate_counts = list(candidates_per_entry.values())
+    exact_title_candidates = sum(candidate["title_exact"] for candidate in candidates)
+    candidate_entry_index = {
+        entry.get("citation_key"): {
+            "candidate_count": candidates_per_entry[entry.get("citation_key")],
+            "candidate_ids": [
+                candidate["candidate_id"]
+                for candidate in candidates
+                if candidate["citation_key"] == entry.get("citation_key")
+            ],
+        }
+        for entry in merged
+    }
+    _atomic_json(paper_dir / "candidate_entry_index.json", candidate_entry_index)
+    if any(replacement not in {entry.get("citation_key") for entry in merged}
+           for replacement in replacements.values()):
+        raise ValueError("citation replacement points to a missing canonical key")
+    _atomic_json(paper_dir / "bibtex_merged.json", merged)
+    _atomic_json(paper_dir / "candidates.json", candidates)
+    stats = {
+        "bibtex_entries_ingested": len(entries),
+        "bibtex_entries_with_title": sum(bool(normalize_text(entry.get("title", "")))
+                                         for entry in entries),
+        "bibtex_entries_with_authors": sum(bool(normalize_authors(
+            entry.get("author", entry.get("authors", ""))
+        )) for entry in entries),
+        "canonical_entries": len(merged),
+        "duplicate_bibtex_entries": len(entries) - len(merged),
+        "merged_keys": len(replacements),
+        "citation_keys_rewritten": citation_occurrences,
+        "citation_key_replacements": replacements,
+        "bibtex_conflicts": len(conflicts),
+        "references_ingested": len(references),
+        "candidate_pairs": len(candidates),
+        "zero_candidate_entries": sum(
+            count == 0 for count in candidates_per_entry.values()
+        ),
+        "zero_candidate_percentage": (
+            round(100 * sum(count == 0 for count in candidate_counts) / len(candidate_counts), 3)
+            if candidate_counts else 0.0
+        ),
+        "candidates_per_entry": candidates_per_entry,
+        "candidate_count_min": min(candidates_per_entry.values(), default=0),
+        "candidate_count_max": max(candidates_per_entry.values(), default=0),
+        "candidate_count_average": (
+            round(statistics.fmean(candidate_counts), 3) if candidate_counts else 0.0
+        ),
+        "candidate_count_median": (
+            statistics.median(candidate_counts) if candidate_counts else 0
+        ),
+        "exact_title_candidates": exact_title_candidates,
+        "fuzzy_title_candidates": len(candidates) - exact_title_candidates,
+        "entries_with_candidates": sum(count > 0 for count in candidate_counts),
+        "candidate_generation_skipped": (
+            len(merged) * len(references) - len(candidates)
+        ),
+        "candidate_generation_skipped_by_reason": candidate_diagnostics,
+        "deduplication_seconds": round(dedup_seconds, 6),
+        "candidate_generation_seconds": round(candidate_seconds, 6),
+        "total_seconds": round(time.perf_counter() - started, 6),
+    }
+    _atomic_json(paper_dir / "m2_stats.json", stats)
+    return stats
+
+
+def run(corpus_dir: Path | None = None) -> list[dict]:
+    root = corpus_dir or _corpus_dir()
+    results = []
+    for paper_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        if any(paper_dir.glob("v*/*.bib")):
+            results.append({"paper": paper_dir.name, **process_paper(paper_dir)})
+    _atomic_json(C.DATA_DIR / "m2_stats.json", results)
+    return results
+
+
+def main() -> None:
+    run()
 
 
 if __name__ == "__main__":

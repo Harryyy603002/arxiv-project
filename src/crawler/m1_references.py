@@ -9,11 +9,19 @@ Mục đích: Crawl reference từ Semantic Scholar, giữ reference có externa
 
 Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
 Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
+
+Chống rate limit (HTTP 429):
+  - Tôn trọng header Retry-After nếu server gửi.
+  - Giãn cách thích ứng: gặp 429 thì tăng khoảng cách giữa các request, thành công thì giảm dần.
+  - Ngắt mạch: nếu nhiều bài liên tiếp thất bại vì 429 thì nghỉ dài (COOLDOWN_SECONDS)
+    rồi mới thử tiếp, thay vì đốt thời gian cho từng bài.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+from datetime import datetime, timezone
 import json
 import logging
 import sys
@@ -24,25 +32,56 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils import config as C  # noqa: E402
+from utils.schemas import validate_reference_rows
 
 log = logging.getLogger("m1_references")
 
 REQUEST_TIMEOUT = 60
-MAX_RETRIES = 4
-BACKOFF_SECONDS = 10
+MAX_RETRIES = 5
+BACKOFF_SECONDS = 15
+MAX_BACKOFF_SECONDS = 120
 RETRY_STATUS = {429, 500, 502, 503, 504}
+BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
+DEFAULT_BATCH_SIZE = 25
+MAX_BATCH_SIZE = 500
+
+# Giãn cách thích ứng
+MAX_EXTRA_DELAY = 30.0
+# Ngắt mạch
+BREAKER_THRESHOLD = 3        # số bài liên tiếp thất bại vì 429 thì nghỉ dài
+COOLDOWN_SECONDS = 300
+
 _last_request_time = 0.0
+_extra_delay = 0.0
+_consecutive_429_failures = 0
+_warned_no_key = False
 
 
 class ReferenceCrawlError(Exception):
     """Semantic Scholar did not return references after the retry budget."""
 
 
+def record_failure(arxiv_id: str, attempts: int, error: Exception | str,
+                   category: str) -> None:
+    """Append a structured failure record without exposing request headers."""
+    C.ensure_dir(C.refs_failures_path().parent)
+    record = {
+        "arxiv_id": C.normalize_arxiv_id(arxiv_id),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "attempts": attempts,
+        "category": category,
+        "error": str(error),
+    }
+    with C.refs_failures_path().open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def polite_wait() -> None:
-    """Keep requests at least C.S2_DELAY_SECONDS apart."""
+    """Keep requests at least C.S2_DELAY_SECONDS (+ giãn cách thích ứng) apart."""
+    gap = C.S2_DELAY_SECONDS + _extra_delay
     elapsed = time.monotonic() - _last_request_time
-    if elapsed < C.S2_DELAY_SECONDS:
-        time.sleep(C.S2_DELAY_SECONDS - elapsed)
+    if elapsed < gap:
+        time.sleep(gap - elapsed)
 
 
 def _touch() -> None:
@@ -50,16 +89,72 @@ def _touch() -> None:
     _last_request_time = time.monotonic()
 
 
+def _on_rate_limited() -> None:
+    global _extra_delay
+    _extra_delay = min(MAX_EXTRA_DELAY, max(2.0, _extra_delay * 2))
+
+
+def _on_success() -> None:
+    global _extra_delay, _consecutive_429_failures
+    _extra_delay = _extra_delay * 0.8 if _extra_delay > 0.5 else 0.0
+    _consecutive_429_failures = 0
+
+
+def _retry_after_seconds(response: requests.Response) -> float | None:
+    """Đọc Retry-After (dạng số giây). Bỏ qua nếu không có/không phải số."""
+    value = response.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
+def _warn_if_no_api_key() -> None:
+    global _warned_no_key
+    if _warned_no_key:
+        return
+    _warned_no_key = True
+    try:
+        headers = {k.lower() for k in (C.s2_headers() or {})}
+    except Exception:  # noqa: BLE001
+        headers = set()
+    if "x-api-key" not in headers:
+        log.warning(
+            "Không thấy x-api-key trong C.s2_headers(): đang dùng pool chung của Semantic Scholar, "
+            "rất dễ bị 429. Hãy đặt API key (xem utils/config.py)."
+        )
+
+
+def _circuit_breaker() -> None:
+    """Nếu nhiều bài liên tiếp thất bại vì 429 thì nghỉ dài trước khi thử bài tiếp theo."""
+    global _consecutive_429_failures
+    if _consecutive_429_failures >= BREAKER_THRESHOLD:
+        log.warning(
+            "%d bài liên tiếp bị 429 - nghỉ %ds rồi thử tiếp",
+            _consecutive_429_failures, COOLDOWN_SECONDS,
+        )
+        time.sleep(COOLDOWN_SECONDS)
+        _consecutive_429_failures = 0
+
+
 def fetch_references(session: requests.Session, arxiv_id: str,
                      attempts: int = MAX_RETRIES) -> list[dict]:
     """Fetch all references, retaining non-arXiv references for later filtering."""
+    global _consecutive_429_failures
+    _warn_if_no_api_key()
+    _circuit_breaker()
+
     base_id = C.split_version(arxiv_id)[0]
     url = C.S2_API_URL.format(arxiv_id=base_id)
     params = {"fields": C.S2_REF_FIELDS, "limit": 1000}
     last_problem = "unknown error"
+    rate_limited = False
 
     for attempt in range(1, attempts + 1):
         polite_wait()
+        retry_after: float | None = None
         try:
             response = session.get(
                 url, headers=C.s2_headers(), params=params, timeout=REQUEST_TIMEOUT
@@ -77,18 +172,99 @@ def fetch_references(session: requests.Session, arxiv_id: str,
                 references = payload.get("references")
                 if not isinstance(references, list):
                     raise ReferenceCrawlError(f"{base_id}: response has no references list")
+                _on_success()
                 return references
 
             last_problem = f"HTTP {response.status_code}"
+            if response.status_code == 429:
+                rate_limited = True
+                _on_rate_limited()
+                retry_after = _retry_after_seconds(response)
             if response.status_code not in RETRY_STATUS:
                 break
 
         if attempt < attempts:
-            wait = BACKOFF_SECONDS * (2 ** (attempt - 1))
-            log.warning("%s - retrying in %ss (%d/%d)", last_problem, wait, attempt, attempts)
+            wait = min(MAX_BACKOFF_SECONDS, BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            if retry_after is not None:
+                wait = max(wait, retry_after)
+            log.warning("%s - retrying in %ss (%d/%d)", last_problem, int(wait), attempt, attempts)
             time.sleep(wait)
 
+    if rate_limited:
+        _consecutive_429_failures += 1
     raise ReferenceCrawlError(f"{base_id}: {last_problem}")
+
+
+def _post_batch(session: requests.Session, ids: list[str],
+                attempts: int = MAX_RETRIES) -> list:
+    """Fetch several papers with one POST; response entries follow request order."""
+    global _consecutive_429_failures
+    _warn_if_no_api_key()
+    _circuit_breaker()
+    body = {"ids": [f"ARXIV:{C.split_version(arxiv_id)[0]}" for arxiv_id in ids]}
+    params = {"fields": C.S2_REF_FIELDS}
+    last_problem = "unknown error"
+    rate_limited = False
+
+    for attempt in range(1, attempts + 1):
+        polite_wait()
+        retry_after = None
+        try:
+            response = session.post(
+                BATCH_URL, headers=C.s2_headers(), params=params, json=body,
+                timeout=REQUEST_TIMEOUT,
+            )
+            _touch()
+        except requests.RequestException as error:
+            _touch()
+            last_problem = f"network error: {error}"
+        else:
+            if response.status_code == 200:
+                try:
+                    papers = response.json()
+                except ValueError as error:
+                    raise ReferenceCrawlError(f"batch: invalid JSON: {error}") from error
+                if not isinstance(papers, list) or len(papers) != len(ids):
+                    raise ReferenceCrawlError("batch: response count does not match request count")
+                _on_success()
+                return papers
+
+            last_problem = f"HTTP {response.status_code}"
+            if response.status_code == 429:
+                rate_limited = True
+                _on_rate_limited()
+                retry_after = _retry_after_seconds(response)
+            if response.status_code in (400, 413):
+                raise ReferenceCrawlError(last_problem)
+            if response.status_code not in RETRY_STATUS:
+                break
+
+        if attempt < attempts:
+            wait = min(MAX_BACKOFF_SECONDS, BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            if retry_after is not None:
+                wait = max(wait, retry_after)
+            log.warning("%s - batch retry in %ds (%d/%d)", last_problem, int(wait), attempt, attempts)
+            time.sleep(wait)
+
+    if rate_limited:
+        _consecutive_429_failures += 1
+    raise ReferenceCrawlError(last_problem)
+
+
+def fetch_batch_group(session: requests.Session, ids: list[str], attempts: int = MAX_RETRIES) -> list:
+    """Split rejected groups to isolate oversized responses or invalid IDs."""
+    try:
+        return _post_batch(session, ids, attempts)
+    except ReferenceCrawlError as error:
+        if str(error) in ("HTTP 400", "HTTP 413") and len(ids) > 1:
+            midpoint = len(ids) // 2
+            log.warning("%s for %d IDs; splitting group", error, len(ids))
+            return (fetch_batch_group(session, ids[:midpoint], attempts)
+                    + fetch_batch_group(session, ids[midpoint:], attempts))
+        if str(error) in ("HTTP 400", "HTTP 413"):
+            log.error("Cannot retrieve references for %s: %s", ids[0], error)
+            return [None]
+        raise
 
 
 def write_refs(arxiv_id: str, references: list[dict]) -> None:
@@ -101,23 +277,225 @@ def write_refs(arxiv_id: str, references: list[dict]) -> None:
     temporary.replace(path)
 
 
-def crawl(ids: list[str], force: bool = False,
-          attempts: int = MAX_RETRIES, session: requests.Session | None = None) -> tuple[int, int]:
-    """Crawl IDs and return ``(written, failed)`` without persisting transient failures."""
-    client = session or requests.Session()
-    written = failed = 0
-    for arxiv_id in ids:
-        if not force and C.refs_path(arxiv_id).exists():
-            log.info("skip %s (refs.json already exists)", arxiv_id)
+def write_raw_refs(arxiv_id: str, payload: dict) -> None:
+    """Write the raw paper response with the citing ID and retrieval envelope."""
+    path = C.raw_refs_path(arxiv_id)
+    C.ensure_dir(path.parent)
+    record = {
+        "arxiv_id": C.split_version(arxiv_id)[0],
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "endpoint": C.S2_API_URL.format(arxiv_id=C.split_version(arxiv_id)[0]),
+        "response": payload,
+    }
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def validate_reference_payload(payload: object) -> list:
+    """Validate the API response shape without discarding incomplete references."""
+    if not isinstance(payload, dict):
+        raise ReferenceCrawlError("response is not an object")
+    references = payload.get("references")
+    if not isinstance(references, list):
+        raise ReferenceCrawlError("response has no references list")
+    for index, reference in enumerate(references):
+        if not isinstance(reference, dict):
+            raise ReferenceCrawlError(f"reference {index} is not an object")
+    return references
+
+
+PUBLISHED_REFERENCE_FIELDS = (
+    "arxiv_id", "ref_arxiv_id", "ref_title", "ref_authors",
+    "ref_submission_date", "ref_venue", "ref_s2_id", "external_ids",
+)
+
+
+def normalize_reference(citing_id: str, reference: dict) -> dict:
+    external_ids = reference.get("externalIds")
+    if not isinstance(external_ids, dict):
+        external_ids = reference.get("external_ids")
+    external_ids = external_ids if isinstance(external_ids, dict) else {}
+    authors = reference.get("authors")
+    if authors is None:
+        authors = reference.get("ref_authors")
+    if isinstance(authors, list):
+        authors = [
+            author.get("name", "") if isinstance(author, dict) else str(author)
+            for author in authors
+        ]
+    return {
+        "arxiv_id": C.normalize_arxiv_id(citing_id),
+        "ref_arxiv_id": C.normalize_arxiv_id(
+            reference.get("ref_arxiv_id") or external_ids.get("ArXiv")
+        ),
+        "ref_title": reference.get("ref_title") or reference.get("title"),
+        "ref_authors": authors or [],
+        "ref_submission_date": (
+            reference.get("ref_submission_date")
+            or reference.get("publicationDate")
+            or (str(reference["year"]) if reference.get("year") else None)
+        ),
+        "ref_venue": reference.get("ref_venue") or reference.get("venue"),
+        "ref_s2_id": reference.get("ref_s2_id") or reference.get("paperId"),
+        "external_ids": external_ids,
+    }
+
+
+def deduplicate_references(rows: list[dict]) -> tuple[list[dict], int]:
+    """Keep the first occurrence of each reference identity deterministically."""
+    unique = []
+    seen = set()
+    duplicates = 0
+    for row in rows:
+        identity = (
+            row.get("ref_s2_id")
+            or row.get("ref_arxiv_id")
+            or (
+                str(row.get("ref_title") or "").strip().casefold(),
+                tuple(str(author).strip().casefold()
+                      for author in row.get("ref_authors") or []),
+                row.get("ref_submission_date"),
+            )
+        )
+        if identity in seen:
+            duplicates += 1
             continue
+        seen.add(identity)
+        unique.append(row)
+    return unique, duplicates
+
+
+def build_published_references() -> dict[str, int]:
+    """Export arXiv-linked references and report reproducible filter counts."""
+    rows = []
+    total = 0
+    with_arxiv_id = 0
+    duplicate_rows = 0
+    for refs_path in sorted(C.DATA_DIR.glob("*/refs.json")):
+        payload = json.loads(refs_path.read_text(encoding="utf-8"))
+        citing_id = payload.get("arxiv_id")
+        normalized = []
+        for reference in payload.get("references", []):
+            if not isinstance(reference, dict):
+                continue
+            total += 1
+            normalized.append(normalize_reference(citing_id, reference))
+        normalized, duplicates = deduplicate_references(normalized)
+        duplicate_rows += duplicates
+        for row in normalized:
+            if row["ref_arxiv_id"]:
+                with_arxiv_id += 1
+                rows.append(row)
+
+    output = C.references_csv_path()
+    C.ensure_dir(output.parent)
+    validate_reference_rows(rows)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PUBLISHED_REFERENCE_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                **row,
+                "ref_authors": json.dumps(row["ref_authors"], ensure_ascii=False),
+                "external_ids": json.dumps(row["external_ids"], ensure_ascii=False),
+            })
+    temporary.replace(output)
+    stats = {
+        "total_local_references": total,
+        "references_with_arxiv_id": with_arxiv_id,
+        "references_without_arxiv_id": total - with_arxiv_id,
+        "published_rows": len(rows),
+        "duplicate_rows": duplicate_rows,
+    }
+    C.ensure_dir(C.DATA_DIR)
+    (C.DATA_DIR / "references_stats.json").write_text(
+        json.dumps(stats, indent=2), encoding="utf-8"
+    )
+    return stats
+
+
+def _write_crawl_stats(stats: dict[str, int | float]) -> None:
+    C.ensure_dir(C.DATA_DIR)
+    path = C.DATA_DIR / "references_crawl_stats.json"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def crawl(ids: list[str], force: bool = False,
+          attempts: int = MAX_RETRIES, session: requests.Session | None = None,
+          batch_size: int | None = None) -> tuple[int, int]:
+    """Crawl IDs and return ``(written, failed)`` without persisting failed requests."""
+    started = time.monotonic()
+    client = session or requests.Session()
+    todo = list(dict.fromkeys(C.split_version(arxiv_id)[0] for arxiv_id in ids))
+    requested = len(todo)
+    if not force:
+        todo = [
+            arxiv_id for arxiv_id in todo
+            if not C.refs_path(arxiv_id).exists() or not C.raw_refs_path(arxiv_id).exists()
+        ]
+    skipped = requested - len(todo)
+    log.info("Need to crawl %d papers", len(todo))
+
+    if batch_size:
+        written = failed = 0
+        for offset in range(0, len(todo), batch_size):
+            group = todo[offset:offset + batch_size]
+            try:
+                papers = fetch_batch_group(client, group, attempts)
+            except ReferenceCrawlError as error:
+                failed += len(group)
+                for arxiv_id in group:
+                    record_failure(arxiv_id, attempts, error, "request_failure")
+                log.error("batch %d-%d failed: %s", offset + 1, offset + len(group), error)
+                continue
+            for arxiv_id, paper in zip(group, papers):
+                try:
+                    references = validate_reference_payload(paper)
+                except ReferenceCrawlError as error:
+                    failed += 1
+                    record_failure(arxiv_id, 0, error, "invalid_response")
+                    log.warning("%s: invalid Semantic Scholar response: %s", arxiv_id, error)
+                    continue
+                write_raw_refs(arxiv_id, paper)
+                write_refs(arxiv_id, references)
+                written += 1
+            log.info("Progress %d/%d | written=%d failed=%d",
+                     min(offset + len(group), len(todo)), len(todo), written, failed)
+        _write_crawl_stats({
+            "requested": requested,
+            "attempted": len(todo),
+            "skipped": skipped,
+            "successful": written,
+            "failed": failed,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        })
+        return written, failed
+
+    written = failed = 0
+    for arxiv_id in todo:
         try:
-            write_refs(arxiv_id, fetch_references(client, arxiv_id, attempts))
+            references = fetch_references(client, arxiv_id, attempts)
         except ReferenceCrawlError as error:
             failed += 1
+            record_failure(arxiv_id, attempts, error, "request_failure")
             log.error("%s", error)
             continue
+        write_raw_refs(arxiv_id, {"references": references})
+        write_refs(arxiv_id, references)
         written += 1
         log.info("saved %s", C.refs_path(arxiv_id))
+    _write_crawl_stats({
+        "requested": requested,
+        "attempted": len(todo),
+        "skipped": skipped,
+        "successful": written,
+        "failed": failed,
+        "duration_seconds": round(time.monotonic() - started, 3),
+    })
     return written, failed
 
 
@@ -130,6 +508,9 @@ def main(argv=None) -> None:
     parser.add_argument("--month-last", nargs="*", default=[],
                         help="last ID for intermediate months, e.g. 2512=25000")
     parser.add_argument("--limit", type=int, help="process only the first N IDs")
+    parser.add_argument("--batch", action="store_true", help="use Semantic Scholar's paper batch endpoint")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"papers per request (1-{MAX_BATCH_SIZE}; default {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--attempts", type=int, default=MAX_RETRIES)
     parser.add_argument("--force", action="store_true", help="recrawl existing refs.json files")
     args = parser.parse_args(argv)
@@ -137,6 +518,8 @@ def main(argv=None) -> None:
         parser.error("--attempts must be at least 1")
     if args.limit is not None and args.limit < 0:
         parser.error("--limit must be zero or greater")
+    if not 1 <= args.batch_size <= MAX_BATCH_SIZE:
+        parser.error(f"--batch-size must be between 1 and {MAX_BATCH_SIZE}")
 
     ids = args.ids
     if args.id_range:
@@ -151,8 +534,10 @@ def main(argv=None) -> None:
     if args.limit is not None:
         ids = ids[:args.limit]
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    log.info("Processing %d IDs", len(ids))
-    written, failed = crawl(ids, args.force, args.attempts)
+    batch_size = args.batch_size if args.batch else None
+    mode = f"batch (size {batch_size})" if batch_size else "individual"
+    log.info("Processing %d IDs using %s requests", len(ids), mode)
+    written, failed = crawl(ids, args.force, args.attempts, batch_size=batch_size)
     log.info("DONE: written=%d failed=%d", written, failed)
 
 

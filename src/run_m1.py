@@ -1,289 +1,361 @@
-"""Chạy pipeline M1 và đo hiệu năng: discovery -> tải source -> reference.
+"""Milestone 1 - crawl arXiv end-to-end và đo hiệu năng bằng PerfRecorder.
 
-Chạy từ thư mục gốc repo:
-    python src/run_m1.py --range 2602.04870-2602.09869
-    python src/run_m1.py --range 2602.04870-2602.09869 --limit 20     # chạy thử
-    python src/run_m1.py --ids 2310.12345 hep-th/9901001
+Chạy MỘT lượt duy nhất trên toàn bộ danh sách ID của nhóm (đã gộp), xuất ra dạng corpus:
+    python src/run_m1.py --ids-file ids.txt --corpus-dir /content/corpus \
+        --user-agent "ten-nhom-crawler/1.0 (mailto:email@domain)"
 
-Kết quả đo: data/benchmark_m1.json
+Phiên bản này đã được tích hợp cơ chế CRAWL REFERENCE BATCH từ m1_references.py
+để tăng tốc độ truy xuất Semantic Scholar mà vẫn giữ nguyên format đầu ra.
 """
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
-import logging
+import re
 import sys
+import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List
 
+import arxiv
 import requests
 
+# Khai báo đường dẫn để import các module nội bộ (crawler, utils)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from crawler import m1_download, m1_metadata, m1_references
+from crawler import m1_download, m1_references
 from utils import config as C
-from utils.benchmark import PerfRecorder, inspect_archive_bytes
+from utils.benchmark import PerfRecorder
 
-log = logging.getLogger("run_m1")
+VERSION_RE = re.compile(r"v(\d+)$")
 
-REF_FIELDS = [
-    "arxiv_id",
-    "ref_arxiv_id",
-    "ref_title",
-    "ref_authors",
-    "ref_submission_date",
-    "ref_s2_id",
-]
+def log(msg: str) -> None:
+    print(msg, flush=True)
 
 
-def _extract_arxiv_id_from_ref(ref: dict) -> str | None:
-    """Lấy externalIds.ArXiv từ một mục reference của Semantic Scholar."""
-    ext = ref.get("externalIds")
-    if isinstance(ext, dict):
-        aid = ext.get("ArXiv") or ext.get("arxiv")
-        if aid and isinstance(aid, str) and aid.strip():
-            return aid.strip()
-    return None
+def folder_name(arxiv_id: str) -> str:
+    """2310.12345 -> 2310-12345 ; hep-th/9901001 -> hep-th_9901001."""
+    return arxiv_id.replace("/", "_").replace(".", "-")
 
 
-def _count_refs(refs: list[dict]) -> Tuple[int, int]:
-    """Trả về (tổng số references, số references có externalIds.ArXiv)."""
-    total = len(refs)
-    with_arxiv = sum(1 for r in refs if isinstance(r, dict) and _extract_arxiv_id_from_ref(r))
-    return total, with_arxiv
+def split_version(short_id: str):
+    m = VERSION_RE.search(short_id)
+    return (short_id[: m.start()], int(m.group(1))) if m else (short_id, None)
 
 
-def download_sources(ids: List[str], perf: PerfRecorder, force: bool = False) -> None:
-    """Tải source từng version, chỉ giữ .tex/.bib, và ghi nhận kích thước vào PerfRecorder."""
-    session = requests.Session()
-    session.headers.update({"User-Agent": m1_download.USER_AGENT})
-
-    for i, raw_id in enumerate(ids, start=1):
-        aid = C.split_version(raw_id)[0]
-        if not C.meta_path(aid).exists():
+def read_ids(path: Path) -> List[str]:
+    ids, seen = [], set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
             continue
+        s, _ = split_version(s)  # bỏ hậu tố version nếu có
+        if s not in seen:
+            seen.add(s)
+            ids.append(s)
+    return ids
 
-        versions = m1_download.read_versions(aid, fallback_n=None)
-        if not versions:
-            continue
 
-        with perf.paper(aid):
-            for v in versions:
-                out_dir = C.version_dir(aid, v)
-                status_file = out_dir / "source_status.json"
+# ----------------------------------------------------------------------------- discovery
+def _query(client: arxiv.Client, id_list: List[str]):
+    search = arxiv.Search(id_list=id_list, max_results=len(id_list))
+    for attempt in range(1, 6):
+        try:
+            return list(client.results(search))
+        except arxiv.HTTPError as error:
+            if error.status != 429 or attempt == 5:
+                raise
+            wait = 30 * attempt
+            log(f"[discovery] arXiv HTTP 429; waiting {wait}s before retry "
+                f"({attempt}/5)")
+            time.sleep(wait)
 
-                # Checkpoint: nếu đã tải từ lần chạy trước và không bật --force
-                if not force and status_file.exists():
-                    try:
-                        st = json.loads(status_file.read_text(encoding="utf-8"))
-                        is_pdf = st.get("status") == "empty"
-                        raw_b = int(st.get("uncompressed_bytes") or st.get("raw_bytes") or 0)
-                        clean_b = int(st.get("extracted_bytes") or 0)
-                        if clean_b == 0 and not is_pdf:
-                            _, _, clean_b = inspect_archive_bytes(b"", out_dir)
-                            raw_b = max(raw_b, clean_b)
-                        perf.record_paper_size(
-                            aid,
-                            before_bytes=raw_b,
-                            after_bytes=clean_b,
-                            archive_bytes=0,
-                            is_pdf_only=is_pdf,
-                            track_disk=False,
-                        )
-                        continue
-                    except (OSError, ValueError):
-                        pass
 
-                try:
-                    data = m1_download.fetch_source(session, aid, v)
-                except m1_download.DownloadError as err:
-                    log.warning("[%d/%d] %s v%d: tải source thất bại (%s)", i, len(ids), aid, v, err)
-                    continue
+def discover(ids: List[str], batch: int = 50) -> Dict[str, dict]:
+    """Dùng arXiv API: (1) ID gốc -> số version, (2) ID có version -> ngày của từng version."""
+    client = arxiv.Client(page_size=100, delay_seconds=3.0, num_retries=3)
+    info: Dict[str, dict] = {}
 
-                status, reason, files = m1_download.save_source(data, out_dir)
-                archive_b, raw_b, clean_b = inspect_archive_bytes(data, out_dir)
-                is_pdf = status == "empty"
+    for i in range(0, len(ids), batch):
+        for r in _query(client, ids[i:i + batch]):
+            base, n = split_version(r.get_short_id())
+            info[base] = {
+                "title": " ".join(r.title.split()),
+                "authors": [a.name for a in r.authors],
+                "venue": r.journal_ref,
+                "n_versions": n or 1,
+                "version_dates": {1: r.published.isoformat()},
+            }
+        log(f"[discovery] latest-version lookup {min(i + batch, len(ids))}/{len(ids)}")
 
-                record = {
-                    "arxiv_id": aid,
-                    "version": v,
-                    "status": status,
-                    "reason": reason,
-                    "files": files,
-                    "raw_bytes": archive_b,
-                    "uncompressed_bytes": raw_b,
-                    "extracted_bytes": clean_b,
-                    "source_url": f"{m1_download.BASE_URL}/{aid}v{v}",
-                    "downloaded_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                }
-                out_dir.mkdir(parents=True, exist_ok=True)
-                status_file.write_text(
-                    json.dumps(record, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+    versioned = [f"{b}v{v}" for b, d in info.items() for v in range(1, d["n_versions"] + 1)]
+    for i in range(0, len(versioned), batch):
+        for r in _query(client, versioned[i:i + batch]):
+            base, v = split_version(r.get_short_id())
+            if base in info and v and v > 1:
+                info[base]["version_dates"][v] = r.updated.isoformat()
+        log(f"[discovery] per-version dates {min(i + batch, len(versioned))}/{len(versioned)}")
+    return info
 
-                perf.record_paper_size(
-                    aid,
-                    before_bytes=raw_b,
-                    after_bytes=clean_b,
-                    archive_bytes=archive_b,
-                    is_pdf_only=is_pdf,
-                    track_disk=True,
-                )
-                log.info(
-                    "[%d/%d] %s v%d: %s (raw=%dB, clean=%dB)",
-                    i, len(ids), aid, v, status, raw_b, clean_b,
-                )
+
+# ----------------------------------------------------------------------------- references
+def normalize_references(raw_refs: list) -> list:
+    """Chuẩn hóa cấu trúc JSON từ Semantic Scholar về đúng format yêu cầu."""
+    return [
+        {
+            key: value
+            for key, value in m1_references.normalize_reference("", ref).items()
+            if key != "arxiv_id"
+        }
+        for ref in raw_refs
+        if isinstance(ref, dict)
+    ]
 
 
 def build_references_table() -> int:
-    """Gộp tất cả data/<paper_key>/refs.json thành data/references.csv và data/references.parquet.
-    Chỉ giữ các reference có externalIds.ArXiv theo đúng quy định của đề bài M1.
-    """
-    import pandas as pd
-
-    rows = []
-    for ref_file in sorted(C.DATA_DIR.glob("*/refs.json")):
-        try:
-            payload = json.loads(ref_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        citing_id = payload.get("arxiv_id")
-        for ref in payload.get("references") or []:
-            if not isinstance(ref, dict):
-                continue
-            ref_arxiv_id = _extract_arxiv_id_from_ref(ref)
-            if not ref_arxiv_id:
-                continue
-            raw_authors = ref.get("authors") or []
-            authors = [
-                a.get("name", str(a)) if isinstance(a, dict) else str(a)
-                for a in raw_authors
-                if a
-            ]
-            sub_date = ref.get("publicationDate") or (
-                str(ref["year"]) if ref.get("year") is not None else None
-            )
-            rows.append({
-                "arxiv_id": citing_id,
-                "ref_arxiv_id": ref_arxiv_id,
-                "ref_title": ref.get("title"),
-                "ref_authors": authors,
-                "ref_submission_date": sub_date,
-                "ref_s2_id": ref.get("paperId"),
-            })
-
-    if not rows:
-        log.warning("Chưa có reference nào chứa arXiv ID trong %s", C.DATA_DIR)
-        return 0
-
-    df = pd.DataFrame(rows).reindex(columns=REF_FIELDS)
-    csv_path = getattr(C, "references_csv_path", lambda: C.DATA_DIR / "references.csv")()
-    parquet_path = getattr(C, "references_parquet_path", lambda: C.DATA_DIR / "references.parquet")()
-
-    csv_df = df.copy()
-    csv_df["ref_authors"] = csv_df["ref_authors"].map(lambda v: json.dumps(v, ensure_ascii=False))
-    csv_df.to_csv(csv_path, index=False, encoding="utf-8")
-    try:
-        df.to_parquet(parquet_path, index=False)
-    except ImportError:
-        log.warning("Thiếu pyarrow nên chưa ghi parquet (pip install pyarrow)")
-    log.info("Bảng references: %d dòng -> %s", len(df), csv_path)
-    return len(df)
+    """Compatibility hook for callers that build the references table separately."""
+    return 0
 
 
-def crawl_references(ids: List[str], perf: PerfRecorder, force: bool = False) -> None:
-    """Crawl reference qua Semantic Scholar, mỗi bài bọc trong `with perf.paper(aid):`."""
+def crawl_references(
+    ids: List[str],
+    perf: PerfRecorder,
+    force: bool = False,
+    batch_size: int = m1_references.DEFAULT_BATCH_SIZE,
+) -> None:
+    """Fetch references in batches for the legacy run_m1 API."""
     session = requests.Session()
+    pending = []
+    seen = set()
 
     for raw_id in ids:
         aid = C.split_version(raw_id)[0]
-        if not C.meta_path(aid).exists():
+        if aid in seen or not C.meta_path(aid).exists():
             continue
+        seen.add(aid)
+        if not force and C.refs_path(aid).exists():
+            continue
+        pending.append(aid)
 
-        ref_path = C.refs_path(aid)
-        with perf.paper(aid):
-            if not force and ref_path.exists():
-                try:
-                    data = json.loads(ref_path.read_text(encoding="utf-8"))
-                    refs = data.get("references") or []
-                    total, with_arxiv = _count_refs(refs)
-                    perf.record_references(aid, True, total_refs=total, arxiv_refs=with_arxiv)
-                    continue
-                except (OSError, ValueError):
-                    pass
+    for offset in range(0, len(pending), batch_size):
+        group = pending[offset:offset + batch_size]
+        started = time.perf_counter()
+        try:
+            papers = m1_references.fetch_batch_group(session, group)
+        except m1_references.ReferenceCrawlError as error:
+            papers = [None] * len(group)
+            for aid in group:
+                m1_references.record_failure(aid, m1_references.MAX_RETRIES,
+                                              error, "request_failure")
+        seconds_per_paper = (time.perf_counter() - started) / len(group)
 
-            try:
-                refs = m1_references.fetch_references(session, aid)
-                m1_references.write_refs(aid, refs)
-                total, with_arxiv = _count_refs(refs)
-                perf.record_references(aid, True, total_refs=total, arxiv_refs=with_arxiv)
-                log.info("saved %s (total=%d, arxiv=%d)", ref_path, total, with_arxiv)
-            except m1_references.ReferenceCrawlError as err:
+        for aid, paper in zip(group, papers):
+            perf.add_paper_time(aid, seconds_per_paper)
+            refs = paper.get("references") if isinstance(paper, dict) else None
+            if not isinstance(refs, list):
+                m1_references.record_failure(aid, 0, "response has no references list",
+                                              "invalid_response")
                 perf.record_references(aid, False)
-                log.error("%s", err)
+                continue
+            m1_references.write_refs(aid, refs)
+            perf.record_references(
+                aid,
+                True,
+                total_refs=len(refs),
+                arxiv_refs=sum(
+                    1 for ref in refs
+                    if isinstance(ref, dict)
+                    and isinstance(ref.get("externalIds"), dict)
+                    and (ref["externalIds"].get("ArXiv") or ref["externalIds"].get("arxiv"))
+                ),
+            )
 
     build_references_table()
 
 
-def main(argv=None) -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--range", help="START-END, vd. 2602.04870-2602.09869")
-    ap.add_argument("--month-last", nargs="*", default=[])
-    ap.add_argument("--ids", nargs="*")
-    ap.add_argument("--limit", type=int)
-    ap.add_argument("--batch-size", type=int, default=C.ARXIV_API_BATCH)
-    ap.add_argument("--force", action="store_true")
-    ap.add_argument("--out", default=None, help="mặc định: data/benchmark_m1.json")
-    args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# ----------------------------------------------------------------------------- crawl batch
+def _fetch_reference_batch(group: List[str]) -> tuple[list, float]:
+    """Fetch one Semantic Scholar batch on a separate service stream."""
+    reference_session = requests.Session()
+    started = time.perf_counter()
+    try:
+        batch_data = m1_references.fetch_batch_group(reference_session, group)
+    except m1_references.ReferenceCrawlError as err:
+        log(f"[batch] ERROR lấy reference: {err}")
+        batch_data = [None] * len(group)
+    finally:
+        reference_session.close()
+    seconds_per_paper = (time.perf_counter() - started) / len(group) if group else 0.0
+    return batch_data, seconds_per_paper
 
-    if args.ids:
-        ids = args.ids
-    elif args.range:
-        ids = list(C.iter_id_range(*C.parse_id_range(args.range), C.parse_month_last(args.month_last)))
-    else:
-        ap.error("cần --range hoặc --ids")
-    if args.limit:
-        ids = ids[:args.limit]
 
-    C.ensure_dir(C.DATA_DIR)
-    out = args.out or str(C.DATA_DIR / "benchmark_m1.json")
-
-    with PerfRecorder("m1", watch_dirs=[C.DATA_DIR]) as perf:
-        with perf.stage("discovery"):
-            m1_metadata.crawl(ids, args.batch_size, args.force)
-            m1_metadata.build_papers_table()
-        per_paper = perf.stage_times["discovery"] / max(len(ids), 1)
-        for aid in ids:
-            base_id = C.split_version(aid)[0]
-            perf.add_paper_time(base_id, per_paper)
-
-        with perf.stage("download"):
-            download_sources(ids, perf, force=args.force)
-
-        with perf.stage("references"):
-            crawl_references(ids, perf, force=args.force)
-
-        for aid in ids:
-            base_id = C.split_version(aid)[0]
-            ok = C.meta_path(base_id).exists()
-            if ok:
-                vers = m1_download.read_versions(base_id, fallback_n=None)
-                ok = bool(vers) and all(
-                    (C.version_dir(base_id, v) / "source_status.json").exists() for v in vers
-                )
-            perf.record_result(base_id, ok)
-
-    summary = perf.save(out)
-    log.info(
-        "Benchmark -> %s | wall=%.1fs, peak RAM=%.0fMB, paper_success=%s, ref_success=%s",
-        out,
-        summary["total_wall_s"],
-        summary["peak_ram_mb"],
-        summary.get("success_rate"),
-        summary.get("ref_success_rate"),
+def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corpus: Path,
+            session: requests.Session, coverage: dict,
+            reference_executor: ThreadPoolExecutor | None = None) -> None:
+    """Process source downloads while the reference batch runs concurrently."""
+    owns_executor = reference_executor is None
+    executor = reference_executor or ThreadPoolExecutor(max_workers=1)
+    reference_future: Future[tuple[list, float]] = executor.submit(
+        _fetch_reference_batch, group
     )
 
+    try:
+        # Source downloads remain serial and use the single arXiv request stream.
+        processed = []
+        for aid in group:
+            paper_info = info.get(aid)
+            if not paper_info:
+                processed.append((aid, None, False))
+                log(f"[{aid}] NOT FOUND in arXiv API")
+                coverage["not_found_papers"] += 1
+                continue
+
+            pdir = corpus / folder_name(aid)
+            pdir.mkdir(parents=True, exist_ok=True)
+            n = paper_info["n_versions"]
+            dates = paper_info["version_dates"]
+            coverage["expected_versions"] += n
+            all_ok = True
+
+            if len(dates) != n:
+                log(f"[{aid}] WARNING: thiếu ngày của {n - len(dates)} version")
+
+            # --- Ghi metadata cấp bài
+            paper_row = {
+                "arxiv_id": aid,
+                "title": paper_info["title"],
+                "authors": paper_info["authors"],
+                "submission_date": dates.get(1),
+                "revised_dates": [dates[v] for v in range(2, n + 1) if v in dates],
+                "venue": paper_info["venue"],
+                "n_versions": n,
+            }
+            (pdir / "paper.json").write_text(json.dumps(paper_row, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            # Source versions are downloaded before the reference result is joined.
+            with rec.paper(aid):
+                for v in range(1, n + 1):
+                    vid = f"{aid}v{v}"
+                    vdir = pdir / f"v{v}"
+                    checkpoint = vdir / "metadata.json"
+                    if checkpoint.exists():
+                        try:
+                            cached = json.loads(checkpoint.read_text(encoding="utf-8"))
+                            archive_bytes = int(cached["archive_bytes"])
+                            before = int(cached["bytes_before"])
+                            after = int(cached["bytes_after"])
+                        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                        else:
+                            rec.record_paper_size(
+                                aid, before, after, archive_bytes=0, is_pdf_only=after == 0
+                            )
+                            coverage["crawled_versions"] += 1
+                            continue
+                    try:
+                        data = m1_download.fetch_source(session, aid, v)
+                        (
+                            status,
+                            reason,
+                            files,
+                            archive_bytes,
+                            before,
+                            after,
+                        ) = m1_download.save_source_with_stats(data, vdir)
+                        no_tex = after == 0
+                        rec.record_paper_size(aid, before, after, archive_bytes, is_pdf_only=no_tex)
+                        record = {
+                            "arxiv_id": vid, "version": v, "date": dates.get(v), "title": paper_info["title"],
+                            "authors": paper_info["authors"], "venue": paper_info["venue"],
+                            "status": status, "reason": reason, "files": files,
+                            "archive_bytes": archive_bytes, "bytes_before": before, "bytes_after": after,
+                        }
+                        vdir.mkdir(parents=True, exist_ok=True)
+                        temporary = checkpoint.with_suffix(".json.tmp")
+                        temporary.write_text(
+                            json.dumps(record, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        temporary.replace(checkpoint)
+                        coverage["crawled_versions"] += 1
+                    except (m1_download.DownloadError, OSError, ValueError, TypeError) as e:
+                        all_ok = False
+                        coverage["failed_versions"] += 1
+                        log(f"[{vid}] ERROR tải source: {e}")
+
+            processed.append((aid, pdir, all_ok))
+
+        # Join the reference response after source work, then write reference
+        # checkpoints for every version without adding another network request.
+        batch_data, seconds_per_paper = reference_future.result()
+        for index, (aid, pdir, all_ok) in enumerate(processed):
+            rec.add_paper_time(aid, seconds_per_paper)
+            if pdir is None:
+                rec.record_result(aid, False)
+                rec.record_references(aid, False)
+                continue
+
+            paper_s2 = batch_data[index]
+            if isinstance(paper_s2, dict):
+                m1_references.write_raw_refs(aid, paper_s2)
+            raw_refs = paper_s2.get("references") if isinstance(paper_s2, dict) else None
+            if isinstance(raw_refs, list):
+                refs = normalize_references(raw_refs)
+                ref_ok = True
+            else:
+                refs = []
+                ref_ok = False
+            arxiv_ref_count = sum(1 for x in refs if x["ref_arxiv_id"])
+            rec.record_references(aid, ref_ok, len(refs), arxiv_ref_count)
+            if ref_ok:
+                m1_references.write_refs(aid, refs)
+            for v in range(1, info[aid]["n_versions"] + 1):
+                vdir = pdir / f"v{v}"
+                if vdir.exists():
+                    (vdir / "references.json").write_text(
+                        json.dumps(refs, ensure_ascii=False), encoding="utf-8"
+                    )
+            rec.record_result(aid, all_ok)
+            log(f"[{aid}] versions={info[aid]['n_versions']} refs={len(refs)} "
+                f"ref_ok={ref_ok} ok={all_ok}")
+    finally:
+        if owns_executor:
+            executor.shutdown(wait=True)
+
+
+# ----------------------------------------------------------------------------- main
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Milestone 1: crawl arXiv + benchmark end-to-end (Batch Ref Mode)")
+    ap.add_argument("--ids-file", required=True, type=Path, help="mỗi dòng một arXiv ID gốc")
+    ap.add_argument("--corpus-dir", default=Path("/content/corpus"), type=Path)
+    ap.add_argument("--bench-out", default=Path("data/benchmark_m1.json"), type=Path)
+    ap.add_argument("--user-agent", default="arxiv-course-crawler/1.0")
+    ap.add_argument("--batch-size", type=int, default=25, help="Số lượng ID gộp lại cho một nhịp gọi API Semantic Scholar")
+    args = ap.parse_args()
+
+    ids = read_ids(args.ids_file)
+    session = requests.Session()
+    session.headers.update({"User-Agent": args.user_agent})
+    coverage = {"expected_versions": 0, "crawled_versions": 0, "failed_versions": 0, "not_found_papers": 0}
+
+    args.corpus_dir.mkdir(parents=True, exist_ok=True)
+    with PerfRecorder("m1", watch_dirs=[args.corpus_dir]) as rec:
+        with rec.stage("discovery"):
+            info = discover(ids)
+        with rec.stage("crawl"):
+            for i in range(0, len(ids), args.batch_size):
+                group = ids[i:i + args.batch_size]
+                log(f"\n=== Đang xử lý Batch {i // args.batch_size + 1} ({len(group)} papers) ===")
+                crawl_batch(group, info, rec, args.corpus_dir, session, coverage)
+
+    data = rec.save(args.bench_out)
+    data["coverage"] = {**coverage,
+                        "version_coverage": round(coverage["crawled_versions"] / coverage["expected_versions"], 4)
+                        if coverage["expected_versions"] else None}
+    args.bench_out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps({k: v for k, v in data.items() if not k.startswith("paper_")}, indent=2, ensure_ascii=False))
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,23 +1,102 @@
-r"""m2_bib_dedup.py
+"""Deterministic BibTeX deduplication and citation-key rewriting."""
 
-Milestone: M2
-Người phụ trách: P2
-Mục đích: Khử trùng lặp BibTeX xuyên version: chọn một citation_key, đổi cite của khóa bị bỏ, gộp trường theo kiểu hợp
+from __future__ import annotations
 
-Đầu vào: BibTeX của mọi version
-Đầu ra:  data/<paper_key>/bibtex_merged.json
+import re
+from collections import defaultdict
 
-Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
-Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
-"""
-
-from utils.config import DATA_DIR, paper_dir, version_dir  # noqa: F401
+from matching.m3_candidates import normalize_authors, normalize_text
 
 
-def main():
-    # TODO(P2): viết code ở đây
-    raise NotImplementedError
+def _merge_value(current: str | None, incoming: str | None) -> tuple[str | None, bool]:
+    if current:
+        return current, bool(incoming and incoming != current)
+    return incoming or None, False
 
 
-if __name__ == "__main__":
-    main()
+def merge_entries(entries: list[dict]) -> tuple[list[dict], dict[str, str], list[dict]]:
+    """Merge duplicate keys, returning entries, replacements, and conflicts."""
+    merged = {}
+    replacements = {}
+    conflicts = []
+    for entry in entries:
+        key = entry["citation_key"]
+        if key not in merged:
+            merged[key] = dict(entry)
+            continue
+        target = merged[key]
+        for field, value in entry.items():
+            if field in {"citation_key", "arxiv_id", "version"} or not value:
+                continue
+            chosen, conflict = _merge_value(target.get(field), value)
+            target[field] = chosen
+            if conflict:
+                conflicts.append({"citation_key": key, "field": field,
+                                  "kept": target[field], "discarded": value})
+        source = entry.get("arxiv_id", "")
+        if source and target.get("arxiv_id") and source != target["arxiv_id"]:
+            conflicts.append({"citation_key": key, "field": "arxiv_id",
+                              "kept": target["arxiv_id"], "discarded": source})
+    return list(merged.values()), replacements, conflicts
+
+
+def deduplicate_keys(entries: list[dict]) -> tuple[list[dict], dict[str, str], list[dict]]:
+    """Deduplicate by normalized title/author identity and assign stable keys."""
+    groups = defaultdict(list)
+    for entry in entries:
+        identity = (
+            normalize_text(entry.get("title", "")),
+            normalize_authors(entry.get("author", entry.get("authors", ""))),
+            str(entry.get("year", "")),
+        )
+        if not any(identity):
+            identity = ("key", entry["citation_key"], "")
+        groups[identity].append(entry)
+
+    canonical_entries = []
+    replacements = {}
+    conflicts = []
+    for group in groups.values():
+        group = sorted(group, key=lambda item: (item["citation_key"], item.get("version", 0) or 0))
+        canonical = group[0]["citation_key"]
+        merged = dict(group[0])
+        for duplicate in group[1:]:
+            replacements[duplicate["citation_key"]] = canonical
+            for field, value in duplicate.items():
+                if field in {"citation_key", "arxiv_id", "version"} or not value:
+                    continue
+                chosen, conflict = _merge_value(merged.get(field), value)
+                merged[field] = chosen
+                if conflict:
+                    conflicts.append({"citation_key": canonical, "field": field,
+                                      "kept": chosen, "discarded": value})
+        canonical_entries.append(merged)
+    return canonical_entries, replacements, conflicts
+
+
+_CITE_RE = re.compile(r"\\cite[a-zA-Z*]*\s*\{([^{}]*)\}")
+
+
+def rewrite_citations_with_count(text: str, replacements: dict[str, str]) -> tuple[str, int]:
+    """Rewrite active citation keys and return the rewritten-key occurrence count."""
+    lines = []
+    rewritten_count = 0
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("%"):
+            lines.append(line)
+            continue
+
+        def replace(match: re.Match[str]) -> str:
+            keys = [key.strip() for key in match.group(1).split(",")]
+            rewritten = [replacements.get(key, key) for key in keys]
+            nonlocal rewritten_count
+            rewritten_count += sum(key in replacements for key in keys)
+            return match.group(0).replace(match.group(1), ",".join(rewritten))
+
+        lines.append(_CITE_RE.sub(replace, line))
+    return "".join(lines), rewritten_count
+
+
+def rewrite_citations(text: str, replacements: dict[str, str]) -> str:
+    """Rewrite citation keys without changing commented-out lines."""
+    return rewrite_citations_with_count(text, replacements)[0]

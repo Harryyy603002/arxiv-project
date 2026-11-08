@@ -1,23 +1,56 @@
-r"""schemas.py
+"""Shared validation schemas for M1 references and M2 candidate outputs."""
 
-Milestone: Chung (M1-M3)
-Người phụ trách: P4
-Mục đích: Schema pyarrow tường minh cho 6 bảng: papers, references, elements, hierarchy, bibtex, predictions
+from __future__ import annotations
 
-Đầu vào: Đặc tả cột trong đề của 3 milestone
-Đầu ra:  Các schema dùng khi xuất Parquet
+REFERENCE_FIELDS = (
+    "arxiv_id",
+    "ref_arxiv_id",
+    "ref_title",
+    "ref_authors",
+    "ref_submission_date",
+    "ref_venue",
+    "ref_s2_id",
+    "external_ids",
+)
+CANDIDATE_FIELDS = (
+    "candidate_id",
+    "arxiv_id",
+    "citation_key",
+    "ref_s2_id",
+    "ref_arxiv_id",
+    "reference_index",
+    "title_similarity",
+    "author_similarity",
+    "bib_title",
+    "ref_title",
+)
 
-Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
-Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
-"""
 
-from config import DATA_DIR, paper_dir, version_dir  # noqa: F401
+def validate_rows(rows: list[dict], required_fields: tuple[str, ...]) -> None:
+    """Raise a descriptive error when exported rows violate a shared schema."""
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise TypeError(f"row {index} is not an object")
+        missing = [field for field in required_fields if field not in row]
+        if missing:
+            raise ValueError(f"row {index} is missing fields: {', '.join(missing)}")
 
 
-def main():
-    # TODO(P4): viết code ở đây
-    raise NotImplementedError
+def validate_reference_rows(rows: list[dict]) -> None:
+    validate_rows(rows, REFERENCE_FIELDS)
+    for index, row in enumerate(rows):
+        if not row["arxiv_id"] or not row["ref_arxiv_id"]:
+            raise ValueError(f"reference row {index} has an empty identifier")
 
 
-if __name__ == "__main__":
-    main()
+def validate_candidate_rows(rows: list[dict]) -> None:
+    validate_rows(rows, CANDIDATE_FIELDS)
+    candidate_ids = [row["candidate_id"] for row in rows]
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise ValueError("candidate IDs must be unique")
+    for index, row in enumerate(rows):
+        if not row["candidate_id"]:
+            raise ValueError(f"candidate row {index} has an empty candidate_id")
+        for field in ("title_similarity", "author_similarity"):
+            if not 0 <= float(row[field]) <= 1:
+                raise ValueError(f"candidate row {index} has invalid {field}")

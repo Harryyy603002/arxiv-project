@@ -43,6 +43,8 @@ logs/
 checkpoints/
 cache/
 
+*.env
+api.env
 # Rác của hệ điều hành / editor
 .DS_Store
 Thumbs.db

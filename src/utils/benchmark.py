@@ -19,6 +19,10 @@ Các chỉ số theo đề:
 
 RAM được tính theo cả cây tiến trình (tiến trình chính + mọi tiến trình con),
 đúng yêu cầu "tổng bộ nhớ của toàn hệ thống" khi có nhiều chương trình.
+
+Quét đĩa: chạy hoàn toàn ở luồng nền. Nếu lần quét đầu quá chậm (vd. Google Drive
+mount trong Colab) thì không quét lặp nữa, dung lượng đĩa cuối được ƯỚC TÍNH
+(baseline + dữ liệu đã ghi) và cờ disk_estimated = True.
 """
 from __future__ import annotations
 
@@ -103,7 +107,7 @@ def inspect_archive_bytes(data: bytes, extracted_dir: Optional[Path] = None) -> 
 class ResourceMonitor:
     """Hai luồng nền: một lấy mẫu RAM (cây tiến trình), một quét dung lượng đĩa.
 
-    Tách luồng để việc quét đĩa chậm không làm trễ các mẫu RAM.
+    Tách luồng để việc quét đĩa chậm không làm trễ các mẫu RAM, và không chặn pipeline.
     """
 
     def __init__(
@@ -112,10 +116,12 @@ class ResourceMonitor:
         interval: float = 0.5,
         disk_interval: float = 5.0,
         pid: Optional[int] = None,
+        max_scan_s: float = 10.0,
     ):
         self.watch_dirs = [Path(d) for d in watch_dirs]
         self.interval = interval
         self.disk_interval = disk_interval
+        self.max_scan_s = max_scan_s          # quét lâu hơn mức này => coi là ổ chậm, không quét lặp
         self._proc = psutil.Process(pid or os.getpid())
         self._stop = threading.Event()
         self._threads: List[threading.Thread] = []
@@ -124,6 +130,9 @@ class ResourceMonitor:
         self.disk_baseline = 0
         self.disk_peak = 0
         self.disk_final = 0
+        self.disk_estimated = False
+        self._scan_s = 0.0
+        self._baseline_ready = threading.Event()
         self._tracked_added_bytes = 0
 
     def _tree_rss(self) -> int:
@@ -175,13 +184,19 @@ class ResourceMonitor:
             self._stop.wait(self.interval)
 
     def _disk_loop(self) -> None:
-        while not self._stop.wait(self.disk_interval):
+        # Lần quét đầu (baseline) chạy ở luồng nền, không chặn pipeline.
+        t = time.perf_counter()
+        baseline = self._sample_disk()
+        self._scan_s = time.perf_counter() - t
+        self.disk_baseline = baseline
+        self._baseline_ready.set()
+        if self._scan_s > self.max_scan_s:    # ổ chậm (vd. Drive): không quét lặp
+            return
+        while not self._stop.wait(max(self.disk_interval, 3 * self._scan_s)):
             self._sample_disk()
 
     def start(self) -> "ResourceMonitor":
         self._add_rss_sample()
-        if self.watch_dirs:
-            self.disk_baseline = self._sample_disk()
         self._threads = [threading.Thread(target=self._ram_loop, daemon=True)]
         if self.watch_dirs:
             self._threads.append(threading.Thread(target=self._disk_loop, daemon=True))
@@ -192,10 +207,18 @@ class ResourceMonitor:
     def stop(self) -> None:
         self._stop.set()
         for t in self._threads:
-            t.join()
+            t.join(timeout=2)                 # không chờ luồng đang quét dở
         self._add_rss_sample()
-        if self.watch_dirs:
-            self._sample_disk()
+        if not self.watch_dirs:
+            return
+        if self._baseline_ready.is_set() and self._scan_s <= self.max_scan_s:
+            self._sample_disk()               # ổ nhanh: đo thật
+        else:                                 # ổ chậm: ước tính, không quét lại
+            est = self.disk_baseline + self._tracked_added_bytes
+            with self._lock:
+                self.disk_final = est
+                self.disk_peak = max(self.disk_peak, est)
+            self.disk_estimated = True
 
     def summary(self) -> Dict[str, float]:
         s = self.rss_samples or [0]
@@ -207,6 +230,7 @@ class ResourceMonitor:
             "peak_disk_mb": round(self.disk_peak / MB, 1),
             "final_output_mb": round(self.disk_final / MB, 1),
             "final_output_bytes": self.disk_final,
+            "disk_estimated": self.disk_estimated,
         }
 
 
@@ -305,6 +329,7 @@ class PerfRecorder:
         track_disk    : False nếu không có chu kỳ archive tạm (tránh tính đỉnh đĩa sai).
         """
         pdf_flag = (after_bytes == 0) if is_pdf_only is None else is_pdf_only
+        # record_archive_cycle tự lấy self.monitor._lock, khác với self._lock nên không deadlock
         with self._lock:
             if track_disk:
                 self.monitor.record_archive_cycle(archive_bytes, 0 if pdf_flag else after_bytes)
