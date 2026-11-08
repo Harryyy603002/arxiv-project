@@ -4,6 +4,7 @@ Pipeline: M1 Crawling → M2 Parsing → M3 Matching.
 
 - Báo cáo (Jupyter Book): <link GitHub Pages>
 - Dataset (Hugging Face): <link dataset>
+- Technical documentation: [docs/README.md](docs/README.md)
 
 ## 1. Chuẩn bị môi trường
 
