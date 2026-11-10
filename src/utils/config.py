@@ -77,6 +77,18 @@ def split_version(arxiv_id: str) -> Tuple[str, Optional[int]]:
     return m.group("base"), (int(ver) if ver else None)
 
 
+def normalize_arxiv_id(arxiv_id: str | None) -> str | None:
+    """Return a base arXiv identifier without URL, namespace, or version."""
+    if not arxiv_id:
+        return None
+    value = str(arxiv_id).strip()
+    value = re.sub(r"^https?://(?:export\.)?arxiv\.org/(?:abs|pdf)/", "", value,
+                   flags=re.IGNORECASE)
+    value = re.sub(r"^arxiv:\s*", "", value, flags=re.IGNORECASE)
+    value = value.removesuffix(".pdf").strip()
+    return split_version(value)[0] or None
+
+
 def paper_key(arxiv_id: str) -> str:
     return split_version(arxiv_id)[0].replace("/", "-").replace(".", "-")
 
@@ -165,6 +177,18 @@ def refs_path(arxiv_id: str) -> Path:
 
 def raw_refs_path(arxiv_id: str) -> Path:
     return paper_dir(arxiv_id) / "refs_raw.json"
+
+
+def refs_failures_path() -> Path:
+    return DATA_DIR / "refs_failures.jsonl"
+
+
+def references_table_path() -> Path:
+    return DATA_DIR / "references.jsonl"
+
+
+def references_csv_path() -> Path:
+    return DATA_DIR / "references.csv"
 
 
 def version_dir(arxiv_id: str, version) -> Path:

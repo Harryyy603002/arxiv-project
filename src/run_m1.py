@@ -101,19 +101,15 @@ def discover(ids: List[str], batch: int = 50) -> Dict[str, dict]:
 # ----------------------------------------------------------------------------- references
 def normalize_references(raw_refs: list) -> list:
     """Chuẩn hóa cấu trúc JSON từ Semantic Scholar về đúng format yêu cầu."""
-    refs = []
-    for ref in raw_refs:
-        ext = ref.get("externalIds") or {}
-        refs.append({
-            "ref_s2_id": ref.get("paperId"),
-            "ref_arxiv_id": ext.get("ArXiv"),
-            "ref_title": ref.get("title"),
-            "ref_authors": [a.get("name") for a in (ref.get("authors") or [])],
-            "ref_submission_date": ref.get("publicationDate") or (str(ref["year"]) if ref.get("year") else None),
-            "ref_venue": ref.get("venue"),
-            "external_ids": ext,
-        })
-    return refs
+    return [
+        {
+            key: value
+            for key, value in m1_references.normalize_reference("", ref).items()
+            if key != "arxiv_id"
+        }
+        for ref in raw_refs
+        if isinstance(ref, dict)
+    ]
 
 
 def build_references_table() -> int:
@@ -146,14 +142,19 @@ def crawl_references(
         started = time.perf_counter()
         try:
             papers = m1_references.fetch_batch_group(session, group)
-        except m1_references.ReferenceCrawlError:
+        except m1_references.ReferenceCrawlError as error:
             papers = [None] * len(group)
+            for aid in group:
+                m1_references.record_failure(aid, m1_references.MAX_RETRIES,
+                                              error, "request_failure")
         seconds_per_paper = (time.perf_counter() - started) / len(group)
 
         for aid, paper in zip(group, papers):
             perf.add_paper_time(aid, seconds_per_paper)
             refs = paper.get("references") if isinstance(paper, dict) else None
             if not isinstance(refs, list):
+                m1_references.record_failure(aid, 0, "response has no references list",
+                                              "invalid_response")
                 perf.record_references(aid, False)
                 continue
             m1_references.write_refs(aid, refs)
@@ -306,6 +307,8 @@ def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corp
                 ref_ok = False
             arxiv_ref_count = sum(1 for x in refs if x["ref_arxiv_id"])
             rec.record_references(aid, ref_ok, len(refs), arxiv_ref_count)
+            if ref_ok:
+                m1_references.write_refs(aid, refs)
             for v in range(1, info[aid]["n_versions"] + 1):
                 vdir = pdir / f"v{v}"
                 if vdir.exists():
