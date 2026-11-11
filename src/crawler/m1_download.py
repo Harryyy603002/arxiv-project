@@ -1,55 +1,33 @@
 r"""m1_download.py
 
 Milestone: M1 - Crawling
-Người phụ trách: P1
-Mục đích: Tải mã nguồn LaTeX của từng version bài báo từ arXiv, chỉ giữ file
-          .tex và .bib. Version không có TeX (chỉ có PDF...) vẫn được ghi lại
-          dưới dạng "bản ghi rỗng" thay vì bị bỏ qua.
+Mục đích: tải mã nguồn LaTeX của một version bài báo từ arXiv và chỉ giữ file .tex/.bib.
+          Version không có TeX (chỉ có PDF...) được trả về trạng thái "empty" kèm lý do,
+          để run_m1.py ghi thành bản ghi rỗng thay vì bỏ qua.
 
-Đầu vào:  data/<paper_key>/versions.json (do P3 tạo) và danh sách arXiv ID
-Đầu ra:   data/<paper_key>/vN/*.tex, *.bib và vN/source_status.json
+Module này là thư viện cho src/run_m1.py (pipeline chính), gồm:
+  - fetch_source(session, arxiv_id, version): tải archive, có chờ lịch sự và thử lại.
+  - save_source_with_stats(data, out_dir): phân loại nội dung tải về, lưu .tex/.bib,
+    trả về (status, reason, files, archive_bytes, bytes_before, bytes_after).
 
-Cách chạy (từ thư mục gốc của repo):
-    # Thử nhanh 3 bài, chỉ version 1:
-    python src/m1_download.py --ids 1706.03762 1810.04805 1512.03385 --versions 1
-
-    # Chạy thật, đọc danh sách ID từ file (mỗi dòng một ID):
-    python src/m1_download.py --ids-file data/ids.txt
-
-Đặc điểm:
-  - Lịch sự với server arXiv: chờ >= 3 giây giữa 2 request, chỉ 1 kết nối,
-    có User-Agent mô tả rõ.
-  - Checkpoint: version nào đã có source_status.json thì lần chạy sau bỏ qua,
-    nên bị ngắt giữa chừng vẫn chạy tiếp được.
-  - Gặp lỗi mạng/429/5xx thì tự thử lại, chờ lâu dần.
+Quy tắc với arXiv: chỉ dùng export.arxiv.org (arxiv.org sẽ bị chặn 403), một kết nối,
+khoảng cách >= 3 giây giữa hai request, thử lại có chờ lâu dần khi lỗi mạng/429/5xx.
 """
 
 from __future__ import annotations
 
-import argparse
 import gzip
 import io
-import json
-import re
-import sys
 import tarfile
 import time
 import zlib
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 import requests
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils.config import CONTACT_EMAIL, paper_dir, version_dir
-
 # ----------------------------------------------------------------------------
 # CẤU HÌNH
 # ----------------------------------------------------------------------------
-USER_AGENT = (
-    "arxiv-course-project-crawler/1.0 "
-    f"(student project; contact: {CONTACT_EMAIL})"
-)
 BASE_URL = "https://export.arxiv.org/src"  # KHÔNG dùng arxiv.org (bị chặn 403)
 MIN_DELAY_SECONDS = 3.0                    # arXiv yêu cầu >= 3 giây/request
 REQUEST_TIMEOUT = 60                       # giây
@@ -90,14 +68,15 @@ def fetch_source(session: requests.Session, arxiv_id: str, version: int) -> byte
 
     for attempt in range(1, MAX_RETRIES + 1):
         polite_wait()
-        _touch() # mới sửa
+        # Ghi mốc ngay TRƯỚC khi gửi: khoảng cách >= MIN_DELAY_SECONDS được tính từ
+        # lúc bắt đầu request này đến lúc bắt đầu request kế tiếp, nên một lần tải
+        # chậm không bị cộng thêm thời gian chờ thừa.
+        _touch()
         try:
             resp = session.get(url, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as err:
-            #_touch()
             last_problem = f"lỗi mạng: {err}"
         else:
-            #_touch()
             if resp.status_code == 200:
                 return resp.content
             last_problem = f"HTTP {resp.status_code}"
@@ -172,21 +151,18 @@ def _write_main_tex(content: bytes, out_dir: Path) -> list[str]:
     return ["main.tex"]
 
 
-def save_source(data: bytes, out_dir: Path) -> tuple[str, str, list[str]]:
-    """Phân tích nội dung tải về và lưu file TeX/BibTeX.
-
-    Trả về (status, reason, files):
-      status = "ok"    -> có ít nhất một file .tex
-      status = "empty" -> không có TeX (bản ghi rỗng); reason cho biết lý do
-    """
-    status, reason, files, _archive, _before, _after = save_source_with_stats(data, out_dir)
-    return status, reason, files
-
-
 def save_source_with_stats(
     data: bytes, out_dir: Path
 ) -> tuple[str, str, list[str], int, int, int]:
-    """Save source and return status, files, and archive byte statistics."""
+    """Phân tích nội dung tải về và lưu file TeX/BibTeX vào out_dir.
+
+    Trả về (status, reason, files, archive_bytes, bytes_before, bytes_after):
+      status = "ok"    -> có ít nhất một file .tex
+      status = "empty" -> không có TeX; reason là một trong: pdf_only, corrupt_archive,
+                          no_tex_in_archive, single_file_not_tex, unknown_format
+      bytes_before = tổng kích thước mọi file trong archive (trước khi bỏ hình)
+      bytes_after  = tổng kích thước .tex/.bib đã giữ (sau khi bỏ hình)
+    """
     archive_bytes = len(data)
 
     if data[:4] == b"%PDF":
@@ -224,133 +200,3 @@ def save_source_with_stats(
         return "ok", "", files, archive_bytes, archive_bytes, archive_bytes
 
     return "empty", "unknown_format", [], archive_bytes, archive_bytes, 0
-
-
-# ----------------------------------------------------------------------------
-# 3. XỬ LÝ MỘT VERSION (kèm checkpoint)
-# ----------------------------------------------------------------------------
-def process_version(session: requests.Session, arxiv_id: str, version: int) -> str:
-    """Xử lý một version. Trả về "ok", "empty" hoặc "skipped".
-    Ném DownloadError nếu tải thất bại."""
-    out_dir = version_dir(arxiv_id, version)
-    status_file = out_dir / "source_status.json"
-
-    if status_file.exists():  # đã làm rồi -> bỏ qua (checkpoint)
-        return "skipped"
-
-    data = fetch_source(session, arxiv_id, version)
-    status, reason, files, archive_bytes, before_bytes, after_bytes = save_source_with_stats(
-        data, out_dir
-    )
-
-    record = {
-        "arxiv_id": arxiv_id,
-        "version": version,
-        "status": status,        # "ok" hoặc "empty"
-        "reason": reason,        # lý do nếu rỗng
-        "files": files,          # các file .tex/.bib đã lưu
-        "raw_bytes": archive_bytes,
-        "uncompressed_bytes": before_bytes,
-        "extracted_bytes": after_bytes,
-        "source_url": f"{BASE_URL}/{arxiv_id}v{version}",
-        "downloaded_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Ghi status SAU CÙNG: có file này nghĩa là version đã xong hoàn toàn.
-    temporary = status_file.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(record, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary.replace(status_file)
-    return status
-
-
-# ----------------------------------------------------------------------------
-# 4. ĐỌC DANH SÁCH ID, DANH SÁCH VERSION VÀ CHẠY
-# ----------------------------------------------------------------------------
-def normalize_id(raw: str) -> str:
-    """'arXiv:2310.12345v2' -> '2310.12345' (bỏ tiền tố và đuôi version)."""
-    arxiv_id = raw.strip()
-    arxiv_id = re.sub(r"^arxiv:", "", arxiv_id, flags=re.IGNORECASE)
-    return re.sub(r"v\d+$", "", arxiv_id)
-
-
-def load_ids(args: argparse.Namespace) -> list[str]:
-    ids: list[str] = list(args.ids or [])
-    if args.ids_file:
-        for line in Path(args.ids_file).read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                ids.append(line)
-    cleaned = [normalize_id(x) for x in ids if x.strip()]
-    return list(dict.fromkeys(cleaned))  # bỏ trùng, giữ thứ tự
-
-
-def read_versions(arxiv_id: str, fallback_n: int | None) -> list[int]:
-    """Đọc danh sách version từ versions.json (do P3 tạo).
-    Nếu chưa có thì dùng --versions N (1..N)."""
-    f = paper_dir(arxiv_id) / "versions.json"
-    if f.exists():
-        info = json.loads(f.read_text(encoding="utf-8"))
-        versions = []
-        for item in info.get("versions", []):
-            value = item.get("version") if isinstance(item, dict) else item
-            if isinstance(value, str):
-                value = value.removeprefix("v")
-            versions.append(int(value))
-        return versions
-    if fallback_n:
-        return list(range(1, fallback_n + 1))
-    return []
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Tải source LaTeX từ arXiv (M1).")
-    p.add_argument("--ids", nargs="*", help="Một hoặc nhiều arXiv ID")
-    p.add_argument("--ids-file", help="File text, mỗi dòng một arXiv ID")
-    p.add_argument("--versions", type=int, default=None,
-                   help="Số version (dùng khi chưa có versions.json)")
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    ids = load_ids(args)
-    if not ids:
-        print("Chưa có arXiv ID nào. Dùng --ids hoặc --ids-file.")
-        return
-    if "example.com" in CONTACT_EMAIL:
-        print("CẢNH BÁO: hãy sửa CONTACT_EMAIL ở đầu file thành email thật.")
-
-    session = requests.Session()  # 1 session = 1 kết nối, đúng yêu cầu
-    session.headers.update({"User-Agent": USER_AGENT})
-
-    counts = {"ok": 0, "empty": 0, "skipped": 0, "failed": 0}
-    failed: list[str] = []
-
-    for i, arxiv_id in enumerate(ids, start=1):
-        versions = read_versions(arxiv_id, args.versions)
-        if not versions:
-            print(f"[{i}/{len(ids)}] {arxiv_id}: chưa có versions.json "
-                  f"và không có --versions -> bỏ qua")
-            continue
-        for v in versions:
-            try:
-                result = process_version(session, arxiv_id, v)
-            except DownloadError as err:
-                counts["failed"] += 1
-                failed.append(f"{arxiv_id}v{v}")
-                print(f"[{i}/{len(ids)}] {arxiv_id} v{v}: THẤT BẠI ({err})")
-                continue
-            counts[result] += 1
-            print(f"[{i}/{len(ids)}] {arxiv_id} v{v}: {result}")
-
-    print("\n=== TỔNG KẾT ===")
-    print(counts)
-    if failed:
-        print("Version thất bại (chạy lại lệnh để thử lại):", ", ".join(failed))
-
-
-if __name__ == "__main__":
-    main()
