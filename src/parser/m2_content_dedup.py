@@ -1,13 +1,14 @@
 """M2 - P3: từ cây thô (tree_raw.json) -> elements + hierarchy đã làm sạch, loại trùng xuyên version.
 
-Đọc : data/<paper_key>/vN/tree_raw.json        (Quoc)
-      data/<paper_key>/cite_map.json           (Tri, tùy chọn: {khóa_cũ: khóa_đã_chọn})
+Đọc : data/<paper_key>/paper.json              (M1: arXiv ID gốc, n_versions)
+      data/<paper_key>/vN/tree_raw.json        (m2_hierarchy.py)
+      data/<paper_key>/cite_map.json           (bước gộp BibTeX, tùy chọn: {khóa_cũ: khóa_đã_chọn})
 Ghi : data/<paper_key>/elements.json           cột: element_id, arxiv_id, kind, content
       data/<paper_key>/hierarchy.json          cột: arxiv_id, version, element_id, parent_id
-      data/<paper_key>/parse_status.json       trạng thái từng version + số lượng trước/sau dedup
+      data/<paper_key>/parse_status.json       trạng thái từng version (ok | empty | missing) + số lượng trước/sau dedup
 
 Chạy từ gốc repo:
-    python src/parser/m2_content_dedup.py                      # mọi bài có versions.json
+    python src/parser/m2_content_dedup.py                      # mọi bài có paper.json
     python src/parser/m2_content_dedup.py --ids 2602.04870
 
 Quy tắc dedup: một element (heading/sentence/formula/figure) có cùng (kind, nội dung đã clean)
@@ -41,6 +42,7 @@ REFERENCE_TITLES = {"references", "bibliography", "references and notes", "refer
 MERGEABLE = {"heading", "sentence", "formula", "figure"}
 ID_PREFIX = {"heading": "h", "sentence": "s", "formula": "e", "figure": "g"}
 
+_INCLUDEGRAPHICS_RE = re.compile(r"(\\includegraphics\s*(?:\[[^\]]*\])?\s*\{[^{}]*\})")
 _CITE_RE = re.compile(r"(\\(?:no)?cite[A-Za-z]*\*?(?:\s*\[[^\]]*\])*\s*)\{([^{}]*)\}")
 
 
@@ -78,8 +80,16 @@ def flatten_tree(tree: dict, cite_map: Optional[Dict[str, str]] = None) -> List[
     def add_text(text: str, parent: int) -> None:
         for seg_kind, seg in split_segments(strip_comments(text or "")):
             if seg_kind == "text":
-                for sent in split_sentences(clean_text(seg)):
-                    add("sentence", rename_cites(sent, cite_map), parent)
+                # \includegraphics nằm ngoài môi trường figure (vd. trong \twocolumn[...]) vẫn là một hình
+                pieces = _INCLUDEGRAPHICS_RE.split(seg)
+                for number, piece in enumerate(pieces):
+                    if number % 2:
+                        fig = clean_figure(piece)
+                        if fig:
+                            add("figure", rename_cites(fig, cite_map), parent)
+                        continue
+                    for sent in split_sentences(clean_text(piece)):
+                        add("sentence", rename_cites(sent, cite_map), parent)
             elif seg_kind == "formula":
                 f = normalize_block_math(seg)
                 if f:
@@ -135,12 +145,23 @@ def _write_json(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+_VERSION_DIR_RE = re.compile(r"^v(\d+)$")
+
+
 def list_versions(arxiv_id: str) -> List[Tuple[str, int]]:
-    data = _read_json(C.versions_path(arxiv_id)) or {}
-    labels = [v["version"] for v in data.get("versions", [])]
-    if not labels:
-        labels = [d.name for d in C.paper_dir(arxiv_id).glob("v[0-9]*") if d.is_dir()]
-    return sorted(((l, int(l[1:])) for l in labels), key=lambda x: x[1])
+    """[(label, số)] của mọi version: các thư mục vN đã có, cộng các version M1 biết là có
+    (paper.json: n_versions) nhưng không tải được (không có thư mục) để thống kê coverage."""
+    numbers = set()
+    pdir = C.paper_dir(arxiv_id)
+    if pdir.is_dir():
+        for d in pdir.iterdir():
+            m = _VERSION_DIR_RE.match(d.name)
+            if d.is_dir() and m:
+                numbers.add(int(m.group(1)))
+    n_versions = (_read_json(pdir / "paper.json") or {}).get("n_versions")
+    if isinstance(n_versions, int) and n_versions > 0:
+        numbers.update(range(1, n_versions + 1))
+    return [(f"v{n}", n) for n in sorted(numbers)]
 
 
 # ----------------------------------------------------------------------------- xử lý một bài
@@ -157,15 +178,21 @@ def process_paper(arxiv_id: str) -> dict:
 
     versions = list_versions(arxiv_id)
     if not versions:
-        log.warning("%s: không có versions.json / thư mục vN, bỏ qua", arxiv_id)
+        log.warning("%s: không có thư mục vN / paper.json, bỏ qua", arxiv_id)
         return {"arxiv_id": arxiv_id, "versions": {}, "n_versions": 0, "n_versions_ok": 0,
                 "n_nodes_before_dedup": 0, "n_elements_after_dedup": 0}
 
     for label, n in versions:
         tree = _read_json(C.tree_raw_path(arxiv_id, label))
-        nodes = flatten_tree(tree, cite_map) if tree else []
-        if not nodes:
-            status[label] = {"status": "empty", "n_nodes": 0}
+        if tree is None:  # M1 biết version này nhưng không tải được (hoặc chưa chạy m2_hierarchy)
+            has_dir = C.version_dir(arxiv_id, label).is_dir()
+            status[label] = {"status": "empty" if has_dir else "missing", "n_nodes": 0,
+                             "reason": "no_tree_raw" if has_dir else "not_downloaded"}
+            continue
+        nodes = flatten_tree(tree, cite_map)
+        if not nodes:  # version rỗng: ghi nhận, không bỏ qua
+            status[label] = {"status": "empty", "n_nodes": 0,
+                             "reason": tree.get("source_reason") or tree.get("error") or tree.get("status")}
             continue
 
         seen: Counter = Counter()
@@ -211,8 +238,9 @@ def process_paper(arxiv_id: str) -> dict:
 
 
 def discover_ids() -> List[str]:
+    """arXiv ID gốc của mọi bài có paper.json (do run_m1.py ghi) trong DATA_DIR."""
     ids = []
-    for p in sorted(C.DATA_DIR.glob("*/versions.json")):
+    for p in sorted(C.DATA_DIR.glob("*/paper.json")):
         d = _read_json(p)
         if d and d.get("arxiv_id"):
             ids.append(d["arxiv_id"])
@@ -238,7 +266,7 @@ def process_all(ids: Optional[List[str]] = None) -> None:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ids", nargs="*", help="chỉ xử lý các ID này (mặc định: mọi bài có versions.json)")
+    ap.add_argument("--ids", nargs="*", help="chỉ xử lý các ID này (mặc định: mọi bài có paper.json)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     process_all(args.ids)

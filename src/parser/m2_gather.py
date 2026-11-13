@@ -6,7 +6,7 @@ Mục đích: 1) find_root_file: tìm FILE GỐC của một version (file .tex 
           2) collect_compilation_files: từ file gốc, đi theo \input / \include đệ quy
              để gom mọi file nằm trên đường biên dịch (các file còn lại là file thừa).
 
-Đầu vào:  data/<paper_key>/vN/*.tex  (do m1_download tạo)
+Đầu vào:  data/<paper_key>/vN/*.tex  (do run_m1.py tạo)
 Đầu ra:   RootResult(root, candidates, reason, n_tex_files)
           - root:       đường dẫn file gốc (tương đối so với thư mục vN) hoặc None
           - candidates: các file ứng viên, xếp từ khả năng cao nhất xuống thấp nhất
