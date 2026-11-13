@@ -74,27 +74,84 @@ def deduplicate_keys(entries: list[dict]) -> tuple[list[dict], dict[str, str], l
     return canonical_entries, replacements, conflicts
 
 
-_CITE_RE = re.compile(r"\\cite[a-zA-Z*]*\s*\{([^{}]*)\}")
-
-
 def rewrite_citations_with_count(text: str, replacements: dict[str, str]) -> tuple[str, int]:
-    """Rewrite active citation keys and return the rewritten-key occurrence count."""
-    lines = []
+    """Rewrite active citation keys and return the rewritten-key occurrence count.
+    Solves limitations: nested-braces, multiline-commands, inline-comments, escaped-percents.
+    """
+    result = []
     rewritten_count = 0
-    for line in text.splitlines(keepends=True):
-        if line.lstrip().startswith("%"):
-            lines.append(line)
-            continue
-
-        def replace(match: re.Match[str]) -> str:
-            keys = [key.strip() for key in match.group(1).split(",")]
-            rewritten = [replacements.get(key, key) for key in keys]
-            nonlocal rewritten_count
-            rewritten_count += sum(key in replacements for key in keys)
-            return match.group(0).replace(match.group(1), ",".join(rewritten))
-
-        lines.append(_CITE_RE.sub(replace, line))
-    return "".join(lines), rewritten_count
+    i = 0
+    n = len(text)
+    
+    while i < n:
+        if text[i] == '\\':
+            # 1. Xử lý dấu phần trăm bị escape: \% (không phải là comment)
+            if i + 1 < n and text[i+1] == '%':
+                result.append('\\%')
+                i += 2
+                continue
+            
+            # 2. Xử lý lệnh \cite (bao gồm cả \citep, \citet... và các ngoặc vuông tùy chọn lùi dòng)
+            cite_match = re.match(r"\\cite[a-zA-Z*]*\s*(?:\[[^\]]*\]\s*)*\{", text[i:])
+            if cite_match:
+                prefix = cite_match.group(0)
+                result.append(prefix)
+                i += len(prefix)
+                
+                # Quét để tìm dấu ngoặc đóng '}', hỗ trợ ngoặc lồng nhau và xuống dòng
+                brace_level = 1
+                start_keys = i
+                while i < n and brace_level > 0:
+                    if text[i] == '\\':
+                        # Bỏ qua các ký tự bị escape bên trong (ví dụ \{ hoặc \})
+                        i += 2
+                        continue
+                    elif text[i] == '{':
+                        brace_level += 1
+                    elif text[i] == '}':
+                        brace_level -= 1
+                    
+                    if brace_level > 0:
+                        i += 1
+                        
+                keys_str = text[start_keys:i]
+                
+                # Tách các mã trích dẫn, đối chiếu với map và tăng biến đếm
+                rewritten_keys = []
+                for k in keys_str.split(','):
+                    original_k = k.strip()
+                    if original_k in replacements:
+                        rewritten_count += 1
+                        # Thay thế nhưng vẫn giữ nguyên khoảng trắng/xuống dòng gốc của tác giả
+                        rewritten_keys.append(k.replace(original_k, replacements[original_k]))
+                    else:
+                        rewritten_keys.append(k)
+                        
+                result.append(",".join(rewritten_keys))
+                
+                if brace_level == 0:
+                    result.append('}')
+                    i += 1
+                continue
+                
+            # Nếu không phải \% hoặc \cite, chép lại dấu \ và đi tiếp
+            result.append('\\')
+            i += 1
+            
+        elif text[i] == '%':
+            # 3. Xử lý comment: phát hiện dấu % ở bất kỳ đâu (kể cả giữa dòng),
+            # bỏ qua tất cả cho tới khi hết dòng (gặp \n).
+            start = i
+            while i < n and text[i] != '\n':
+                i += 1
+            result.append(text[start:i])
+            # Không tăng i qua ký tự \n, để vòng lặp sau tự chép ký tự \n vào kết quả
+            
+        else:
+            result.append(text[i])
+            i += 1
+            
+    return "".join(result), rewritten_count
 
 
 def rewrite_citations(text: str, replacements: dict[str, str]) -> str:
