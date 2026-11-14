@@ -173,7 +173,16 @@ def _load_cache(path: Optional[Path]):
             d["version_dates"] = {int(k): v for k, v in d["version_dates"].items()}
             info[base] = d
         return info, set(raw.get("not_found", []))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        log(f"[cache] WARNING: không load được cache từ {path}: {type(e).__name__}: {e}")
+        # Backup cache hỏng để debug sau
+        if path and path.exists():
+            backup_path = path.with_suffix(f".json.broken_{int(time.time())}")
+            try:
+                shutil.copy2(path, backup_path)
+                log(f"[cache] đã backup cache hỏng vào {backup_path}")
+            except Exception:
+                pass
         return {}, set()
 
 
@@ -281,16 +290,47 @@ def _load_cached_refs(aid: str) -> Optional[list]:
         return None
 
 
-def backup_papers(group: List[str], corpus: Path, backup_dir: Path) -> None:
-    """Sao lưu thư mục các bài vừa xong (vd. ra Google Drive) để không mất khi Colab ngắt."""
+def backup_critical_files(corpus: Path, backup_dir: Path) -> None:
+    """Sao lưu NHANH các file cache và log quan trọng (discovery_cache.json, benchmark logs).
+    
+    Dùng cho checkpoint thường xuyên vì rất nhẹ (~1-5 MB).
+    """
+    import tarfile
+    
     backup_dir.mkdir(parents=True, exist_ok=True)
-    for aid in group:
-        src = corpus / folder_name(aid)
-        if src.exists():
-            shutil.copytree(src, backup_dir / src.name, dirs_exist_ok=True)
-    cache = corpus / CACHE_NAME
-    if cache.exists():
-        shutil.copy2(cache, backup_dir / CACHE_NAME)
+    critical_tar = backup_dir / "critical_cache.tar.gz"
+    
+    # Tạo tarball chứa cache và benchmark logs
+    with tarfile.open(critical_tar, "w:gz") as tar:
+        cache = corpus / CACHE_NAME
+        if cache.exists():
+            tar.add(cache, arcname=CACHE_NAME)
+        
+        bench_dir = corpus / "benchmark"
+        if bench_dir.exists():
+            for f in bench_dir.glob("*.json"):
+                tar.add(f, arcname=f"benchmark/{f.name}")
+
+
+def backup_papers(group: List[str], corpus: Path, backup_dir: Path) -> None:
+    """Sao lưu thư mục các bài vừa xong (vd. ra Google Drive) để không mất khi Colab ngắt.
+    
+    Dùng tarball thay vì copy từng file để nhanh hơn 10-20 lần khi restore.
+    """
+    import tarfile
+    
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Tạo tarball chứa papers của batch này
+    # Tên file theo timestamp để tránh ghi đè
+    timestamp = int(time.time())
+    batch_tar = backup_dir / f"papers_batch_{timestamp}.tar.gz"
+    
+    with tarfile.open(batch_tar, "w:gz") as tar:
+        for aid in group:
+            src = corpus / folder_name(aid)
+            if src.exists():
+                tar.add(src, arcname=src.name)
 
 
 def crawl_batch(group: List[str], info: Dict[str, dict], rec: PerfRecorder, corpus: Path,
@@ -470,10 +510,24 @@ def _next_session(bench_dir: Path):
 
 
 def backup_benchmark(corpus: Path, backup_dir: Path) -> None:
-    """Sao lưu log các phiên: mất log nghĩa là mất bằng chứng thời gian chạy."""
+    """Sao lưu log các phiên: mất log nghĩa là mất bằng chứng thời gian chạy.
+    
+    Dùng tarball để nhanh hơn, nhưng vì file nhỏ nên không cải thiện nhiều.
+    """
+    import tarfile
+    
     source = corpus / "benchmark"
-    if source.exists():
-        shutil.copytree(source, backup_dir / "benchmark", dirs_exist_ok=True)
+    if not source.exists():
+        return
+    
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    bench_tar = backup_dir / "benchmark_logs.tar.gz"
+    
+    with tarfile.open(bench_tar, "w:gz") as tar:
+        for f in source.glob("*.json"):
+            tar.add(f, arcname=f"benchmark/{f.name}")
+        for f in source.glob("*.csv"):
+            tar.add(f, arcname=f"benchmark/{f.name}")
 
 
 def main() -> int:
@@ -563,6 +617,11 @@ def main() -> int:
             with rec.stage("discovery"):
                 info, coverage["discovery_cached_ids"] = discover(ids, cache_path=cache_path)
             checkpoint(force=True)
+            # Backup cache ngay sau discovery để tránh mất cache nếu ngắt trong batch đầu tiên
+            if args.backup_dir:
+                log("[backup] Đang backup discovery cache...")
+                backup_critical_files(corpus, args.backup_dir)
+                log("[backup] ✓ Discovery cache đã được backup")
             for i in range(0, len(ids), args.batch_size):
                 group = ids[i:i + args.batch_size]
                 log(f"\n=== Đang xử lý Batch {i // args.batch_size + 1} ({len(group)} papers) ===")
