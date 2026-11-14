@@ -155,7 +155,7 @@ def failed_ids_path() -> Path:
 
 
 def checkpoint_path(name: str) -> Path:
-    """File checkpoint để chạy tiếp khi bị ngắt, vd. checkpoint_path('m1_metadata')."""
+    """File checkpoint để chạy tiếp khi bị ngắt, vd. checkpoint_path('m1_crawl')."""
     return LOGS_DIR / f"{name}.checkpoint.json"
 
 

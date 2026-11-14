@@ -295,6 +295,26 @@ class PerfRecorder:
             with self._lock:
                 self.stage_times[name] = self.stage_times.get(name, 0.0) + dt
 
+    def add_stage_time(self, name: str, seconds: float) -> None:
+        """Cộng thời gian vào một giai đoạn mà không cần context manager
+        (dùng khi muốn ghi dần từng batch để phiên bị ngắt vẫn có số liệu)."""
+        with self._lock:
+            self.stage_times[name] = self.stage_times.get(name, 0.0) + seconds
+
+    def checkpoint(self, path: Path | str, extra: Optional[Dict] = None) -> Dict:
+        """Lưu số liệu tạm thời trong lúc đang chạy (phiên Colab có thể bị ngắt đột ngột).
+
+        total_wall_s được tính đến thời điểm hiện tại; khi stop() sẽ ghi đè bằng giá trị thật.
+        """
+        running = bool(self._t0) and not self.wall_s
+        if running:
+            self.wall_s = time.perf_counter() - self._t0
+        try:
+            return self.save(path, extra=extra)
+        finally:
+            if running:
+                self.wall_s = 0.0
+
     @contextmanager
     def paper(self, arxiv_id: str):
         """Đo tổng thời gian xử lý một bài (mọi version). Gọi lại cùng ID thì cộng dồn."""
@@ -434,10 +454,13 @@ class PerfRecorder:
         out.update(self.monitor.summary())
         return out
 
-    def save(self, path: Path | str | None = None, include_per_paper: bool = True) -> Dict:
-        """Lưu JSON; mặc định data/benchmark_<milestone>.json."""
+    def save(self, path: Path | str | None = None, include_per_paper: bool = True,
+             extra: Optional[Dict] = None) -> Dict:
+        """Lưu JSON; mặc định data/benchmark_<milestone>.json. `extra` được gộp vào đầu ra."""
         path = path or f"data/benchmark_{self.milestone}.json"
         data = self.summary()
+        if extra:
+            data.update(extra)
         if include_per_paper:
             data["paper_times_s"] = {k: round(v, 3) for k, v in self.paper_times.items()}
             if self.paper_sizes_before:
