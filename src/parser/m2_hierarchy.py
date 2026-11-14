@@ -4,7 +4,7 @@ Milestone: M2
 Người phụ trách: P1
 Mục đích: Dựng cây Document > Section > ... > lá (câu, công thức khối, hình/bảng); xử lý section có dấu *, appendix; bỏ phần References
 
-Đầu vào: Nội dung các file từ m2_gather
+Đầu vào: data/<paper_key>/vN/*.tex (do run_m1.py tạo) qua m2_gather; paper.json cho arXiv ID gốc
 Đầu ra:  data/<paper_key>/vN/tree_raw.json
 
 Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
@@ -14,7 +14,7 @@ Cách làm (4 bước, mỗi bước là một hàm):
   1. expand_includes: mở rộng \input/\include TẠI CHỖ, bắt đầu từ file gốc (m2_gather) -> một chuỗi LaTeX
      duy nhất đúng thứ tự đọc. Comment (%) và \begin{comment} đã bị bỏ.
   2. extract_body: lấy phần giữa \begin{document} và \end{document}.
-  3. scan_blocks: quét thân tài liệu thành DANH SÁCH PHẲNG các khối: heading, paragraph, equation,
+  3. scan_blocks: quét thân tài liệu thành DANH SÁCH PHẲNG các khối (bỏ \\title/\\author/\\date...): heading, paragraph, equation,
      figure, itemize, container (abstract). Đoạn văn chỉ dừng ở mức paragraph (P3 sẽ tách câu).
   4. build_tree: lồng các heading thành cây. Cấp (level) được xác định TỰ ĐỘNG theo các lệnh phân mục
      mà bài thực sự dùng (bài dùng \chapter thì chapter = 1, bài chỉ có \section/\paragraph thì = 1, 2).
@@ -38,9 +38,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # src/    (để import utils)
 sys.path.insert(0, str(Path(__file__).resolve().parent))       # parser/ (để import m2_gather)
-from utils.config import DATA_DIR, paper_dir, version_dir  # noqa: F401
+from utils.config import paper_dir
 from utils.config import iter_id_range, parse_id_range, parse_month_last  # noqa: E402
-import m2_gather as G  # noqa: E402
+from utils import config as _cfg  # noqa: E402  (đọc DATA_DIR hiện hành, không bị cố định lúc import)
+import m2_gather as G
+import m2_macro_expansion as ME  # **Tầng 1**: bung macro và môi trường
+from m2_cleanup import expand_user_macros  # noqa: E402 - Giữ lại dự phòng (tương thích)
+from m2_cleanup import normalize_block_math, split_segments  # noqa: E402
 
 # ----------------------------------------------------------------------------
 # HẰNG SỐ
@@ -70,6 +74,9 @@ MARK_RE = re.compile(
     r"|(?P<inl>(?<!\\)\$)"
     r"|(?P<br>(?<!\\)\\\[)"
     r"|(?P<paren>(?<!\\)\\\()"
+    r"|(?P<meta>\\(?:title|author|date|affiliation|affil|institute|institution|address|email|thanks|keywords"
+    r"|subjclass|orcid|titlerunning|authorrunning|icmltitle|icmlauthor|icmlaffiliation"
+    r"|icmlcorrespondingauthor)(?![A-Za-z@]))"
     r"|(?P<drop>\\(?:maketitle|tableofcontents|listoffigures|listoftables|newpage|clearpage|appendix)(?![A-Za-z@])"
     r"|\\bibliography(?:style)?\s*\{[^}]*\})"
 )
@@ -324,6 +331,12 @@ def scan_blocks(text: str) -> list[tuple]:
             close = find_unescaped(text, "\\)", m.end())
             pos = close + 2 if close >= 0 else m.end()
 
+        elif m.group("meta"):                                      # \title{..}, \author{..}, \date{..}: không phải nội dung bài
+            p = skip_ws(text, read_optional(text, skip_ws(text, m.end())))
+            got = read_braced(text, p)
+            flush(m.start())
+            start = pos = got[1] if got else m.end()
+
         else:                                                      # \maketitle, \appendix, \bibliography{..}...
             flush(m.start())
             start = pos = m.end()
@@ -397,6 +410,15 @@ def build_tree(blocks: list[tuple]) -> dict:
 # ----------------------------------------------------------------------------
 # 5. MỘT VERSION / MỘT BÀI / NHIỀU BÀI
 # ----------------------------------------------------------------------------
+def m1_source_reason(vdir: Path) -> str | None:
+    """Lý do version rỗng do M1 ghi trong vN/metadata.json (pdf_only, no_tex_in_archive, ...)."""
+    try:
+        meta = json.loads((Path(vdir) / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return meta.get("reason") or None
+
+
 def parse_version(vdir: Path, arxiv_id: str | None = None) -> dict:
     """Dựng tree_raw cho một thư mục vN. Luôn trả về một dict hợp lệ, kể cả khi version rỗng/lỗi.
 
@@ -411,10 +433,20 @@ def parse_version(vdir: Path, arxiv_id: str | None = None) -> dict:
         out["root_file"], out["reason"] = res.root, res.reason
         if res.root is None:
             out["status"] = "empty" if res.reason == "no_tex_files" else "no_root"
+            if out["status"] == "empty":
+                out["source_reason"] = m1_source_reason(vdir)  # vd. pdf_only (từ M1)
             return out
         comp = G.collect_compilation_files(vdir, root=res.root)
         out["n_unused"], out["n_unresolved"] = len(comp.unused), len(comp.unresolved)
-        body = extract_body(expand_includes(vdir, res.root))
+        
+        # Gộp file
+        full_text = expand_includes(vdir, res.root)
+        
+        # **Tầng 1**: Bung macro và môi trường tự định nghĩa (mới)
+        full_text = ME.preprocess_version_text(full_text)
+        
+        # Parse tree
+        body = extract_body(full_text)
         out["root"] = build_tree(scan_blocks(body))
     except Exception as exc:  # noqa: BLE001 - một bài lỗi không được làm hỏng cả lượt chạy
         out["status"], out["error"] = "error", f"{type(exc).__name__}: {exc}"
@@ -436,8 +468,9 @@ def process_paper(arxiv_id: str, skip_existing: bool = False) -> list[tuple[str,
 
 
 def read_arxiv_id(pdir: Path) -> str | None:
-    """arXiv ID gốc của một thư mục <paper_key> (đọc từ versions.json hoặc meta.json)."""
-    for name in ("versions.json", "meta.json"):
+    """arXiv ID gốc của một thư mục <paper_key> (đọc từ paper.json do run_m1.py ghi;
+    versions.json/meta.json là định dạng cũ, giữ để tương thích)."""
+    for name in ("paper.json", "versions.json", "meta.json"):
         try:
             aid = json.loads((pdir / name).read_text(encoding="utf-8")).get("arxiv_id")
         except (OSError, ValueError):
@@ -450,7 +483,8 @@ def read_arxiv_id(pdir: Path) -> str | None:
 def list_all_ids() -> list[str]:
     """arXiv ID của mọi bài đang có trong data/."""
     ids = []
-    for d in sorted(Path(DATA_DIR).iterdir()) if Path(DATA_DIR).is_dir() else []:
+    data_dir = Path(_cfg.DATA_DIR)
+    for d in sorted(data_dir.iterdir()) if data_dir.is_dir() else []:
         if d.is_dir():
             aid = read_arxiv_id(d)
             if aid:
