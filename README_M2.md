@@ -341,7 +341,3 @@ Tách ở `.`, `!`, `?` khi câu sau bắt đầu bằng chữ hoa, ngoặc mở
 | Không có `elements.json` của một bài | Bài đó chưa có `paper.json` (M1 chưa xong) hoặc thư mục `vN` rỗng. |
 | UnicodeEncodeError khi in tiếng Việt (Windows) | `$env:PYTHONUTF8="1"` trước khi chạy. |
 | File `unknown_commands.json` rỗng | **Kết quả tốt!** Tầng 1 và Tầng 2 đã xử lý hết các lệnh. |
-
-## 9. Tài liệu thêm
-
-- **[docs/CHANGELOG_M2_IMPROVEMENT.md](docs/CHANGELOG_M2_IMPROVEMENT.md)**: Chi tiết kiến trúc hai tầng, ví dụ, hướng dẫn vòng lặp cải tiến
