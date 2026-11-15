@@ -1,6 +1,5 @@
 from parser.m2_bib_dedup import (
     deduplicate_keys,
-    rewrite_citations,
     rewrite_citations_with_count,
 )
 from parser.m2_bibitem import parse_bibtex_entries
@@ -41,14 +40,11 @@ def test_deduplicate_keys_merges_fields_and_rewrites_only_active_citations():
     assert replacements == {"second": "first"}
     assert merged[0]["url"] == "https://example.test"
     assert conflicts == []
-    assert rewrite_citations("\\cite{first, second}\n% \\cite{second}\n", replacements) == (
-        "\\cite{first,first}\n% \\cite{second}\n"
+    # dedup gộp khóa trùng trong cùng một \cite -> "first", comment giữ nguyên
+    assert rewrite_citations_with_count("\\cite{first, second}\n% \\cite{second}\n", replacements) == (
+        "\\cite{first}\n% \\cite{second}\n",
+        1,
     )
-    rewritten, count = rewrite_citations_with_count(
-        "\\cite{first, second}\n% \\cite{second}\n", replacements
-    )
-    assert rewritten.startswith("\\cite{first,first}")
-    assert count == 1
 
 
 def test_candidate_generation_stays_within_citing_paper_and_keeps_features():
@@ -100,8 +96,9 @@ def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
     (version / "main.tex").write_text("\\cite{first}\n", encoding="utf-8")
     (paper / "refs.json").write_text(json.dumps({
         "arxiv_id": "1234.56789",
-        "references": [{"paperId": "s2", "title": "A Study",
-                        "externalIds": {"ArXiv": "9876.54321"}}],
+        "references": [{"ref_s2_id": "s2", "ref_title": "A Study",
+                        "ref_arxiv_id": "9876.54321", "ref_authors": ["Doe"],
+                        "external_ids": {"ArXiv": "9876.54321"}}],
     }), encoding="utf-8")
 
     stats = process_paper(paper)
@@ -113,7 +110,7 @@ def test_process_paper_writes_merged_candidates_and_stats(tmp_path):
     assert stats["candidate_count_max"] == 1
     assert (paper / "bibtex_merged.json").exists()
     assert (paper / "bibtex_entries_raw.json").exists()
-    assert (paper / "citation_key_replacements.json").exists()
+    assert json.loads((paper / "cite_map.json").read_text(encoding="utf-8")) == {}
     assert (paper / "candidate_entry_index.json").exists()
     assert stats["bibtex_entries_with_title"] == 1
     assert stats["bibtex_entries_with_authors"] == 1

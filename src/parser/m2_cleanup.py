@@ -803,7 +803,9 @@ def process_unknown_commands(text: str) -> str:
     # Tạo tập hợp các lệnh đã biết
     known_commands = set(DROP_WITH_ARGS.keys()) | set(DROP_NO_ARGS) | set(SPACE_COMMANDS) | \
                      set(UNWRAP_COMMANDS) | set(UNWRAP_SECOND_ARG.keys()) | \
-                     {"begin", "end", "item", "cite", "ref", "label", "includegraphics"}
+                     {"begin", "end", "item", "cite", "ref", "label", "includegraphics",
+                      "caption", "linewidth", "textwidth", "columnwidth", "textheight",
+                      "paperwidth", "paperheight"}
     
     out, last = [], 0
     for m in pattern.finditer(text):

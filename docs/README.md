@@ -21,7 +21,7 @@ If you are about to run something, read the "run order" section of [06 Integrati
 ## The nine documents
 
 | Doc | What it answers |
-|---|---|
+| --- | --- |
 | [00 Project overview](./00_project_overview.md) | Objectives, official requirements, 18-day schedule, P1–P4 ownership matrix, implementation status |
 | [01 System architecture](./01_system_architecture.md) | Repository layout, module responsibilities, Mermaid data-flow diagram, design principles, external APIs |
 | [02 Data contracts](./02_data_contracts.md) | Every intermediate JSON payload with a real example, plus all six final Parquet schemas |
@@ -68,28 +68,27 @@ A feature being *implemented* does not mean it is *wired up*. `m2_hierarchy` is 
 
 Full detail in [06 Integration](./06_integration.md) and [08 Development log](./08_development_log.md) §4.
 
-| # | Defect | Severity |
-|---|---|---|
-| 1 | `PREDICTIONS_SCHEMA` does not match the statement's required columns | blocks M3 export |
-| 2 | `run_m1.folder_name` and `config.paper_key` disagree on old-style IDs (`hep-th/9901001`) | silent data loss |
-| 3 | `run_m2.py` never calls `m2_hierarchy` or `m2_content_dedup` | empty outputs for a fresh run |
-| 4 | `citation_key_replacements.json` vs `cite_map.json` filename mismatch | dead code path |
-| 5 | `run_m2.py` rewrites `.tex` files in place | corpus corruption, unrecoverable |
-| 6 | `m2_bibitem.py` ignores inline `\bibitem` | missing bibtex for older papers |
-| 7 | `references.parquet` never written; `papers.parquet` bypasses its schema | two of six tables unpublishable |
-| 8 | `run_m2.run` skips papers with no `.bib` file | silent paper loss |
+| # | Defect | Severity | Impact |
+| --- | --- | --- | --- |
+| 1 | `m2_hierarchy.py:45` imports missing `m2_macro_expansion` | 🔴 Critical | Breaks `run_m2.py --steps tree` and crashes 3 test files during collection |
+| 2 | 7 test files fail collection in `pytest` | 🔴 Critical | Breaks standard `python -m pytest` test execution |
+| 3 | `PREDICTIONS_SCHEMA` does not match the statement's required columns | 🟠 High | Blocks M3 export (requires 5 candidate columns) |
+| 4 | `run_m1.folder_name` and `config.paper_key` disagree on old-style IDs (`hep-th/9901001`) | 🟠 High | Silent data loss for pre-2007 papers |
+| 5 | `run_m2.py --steps content` silently drops trees if `tree` was not run in the same process | 🟡 Medium | Incomplete `elements.json` if run steps are decoupled |
+| 6 | Redundant `v{N}/references.json` duplicated per version | 🟡 Medium | Disk space waste across thousands of versions |
+| 7 | `unknown_commands` counter in `m2_cleanup.py` never reset | 🟡 Low | Cumulative counts across multiple runs in same process |
 
 ---
 
 ## Verify your environment
 
 ```powershell
-python -m pytest src/tests -q
+python -m pytest src/tests -q --no-header --continue-on-collection-errors
 ```
 
-Expect `150 passed`. If you get fewer, or imports fail, check that `pytest.ini` (which sets `pythonpath = src`) is still at the repository root.
+Current empirical baseline: `4 failed, 77 passed, 7 errors` (due to test imports lagging behind the collaborator's recent refactoring).
 
-Dependencies: `pip install -r src/requirements.txt`. Note that the root `requirements.txt` is a stale leftover — see [08 Development log](./08_development_log.md) §6.8.
+Dependencies: `pip install -r src/requirements.txt`. Note that the root `requirements.txt` is a stale leftover — see [08 Development log](./08_development_log.md) §5.
 
 ---
 

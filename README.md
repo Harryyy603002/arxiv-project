@@ -1,149 +1,293 @@
-# Đồ án arXiv: Milestone 1 (Data Crawling)
+# arXiv Project: Nhóm <tên nhóm>
 
-Mã nguồn crawl toàn bộ **mọi version** của các bài báo arXiv được phân công. Với mỗi bài, chương trình:
+Đồ án môn học: Xây dựng pipeline dữ liệu và ghép nối trích dẫn bài báo khoa học arXiv (**Milestone 1: Crawling → Milestone 2: Parsing → Milestone 3: Matching**).
 
-1. Tra metadata và số version qua **arXiv API** (thư viện `arxiv`).
-2. Tải source từng version qua `https://export.arxiv.org/src/<id>v<N>`, **chỉ giữ `.tex` và `.bib`** (bỏ hình ảnh). Version chỉ có PDF vẫn được ghi một "bản ghi rỗng".
-3. Lấy danh sách reference qua **Semantic Scholar API** (gọi theo batch, chạy song song với bước tải source).
-4. Dựng hai bảng Parquet `papers` và `references` đúng schema đề, và đo hiệu năng (thời gian, RAM, đĩa) **theo từng phiên chạy**, kèm bản tổng hợp các phiên.
+- **Báo cáo (Jupyter Book):** `<link GitHub Pages>`
+- **Dataset (Hugging Face):** `<link dataset>`
+- **Tài liệu kỹ thuật chi tiết:** [docs/README.md](docs/README.md)
+- **Nhật ký thay đổi M1/M2:** [docs/CHANGELOG_M1_M2.md](docs/CHANGELOG_M1_M2.md)
 
-## 1. Cấu trúc repo
+---
+
+## 1. Giới thiệu tổng quan
+
+Dự án xử lý dữ liệu quy mô lớn từ arXiv và Semantic Scholar, chia thành 3 giai đoạn chính:
+
+1. **Milestone 1 — Data Crawling (`src/run_m1.py`):**
+   - Thu thập metadata và toàn bộ mọi version (`v1`, `v2`, ...) của 20.000 bài báo arXiv được phân công qua arXiv API và `export.arxiv.org`.
+   - Tải và giải nén source TeX từng version, **chỉ giữ lại file `.tex` và `.bib`** (loại bỏ toàn bộ hình ảnh và file phụ trợ). Version chỉ có PDF vẫn được ghi nhận một "bản ghi rỗng" (`vN/metadata.json`) để phục vụ thống kê.
+   - Thu thập danh sách tài liệu tham khảo (references) qua Semantic Scholar API bằng batch requests (25 bài/nhịp), thực thi song song bất đồng bộ với luồng tải source TeX.
+   - Dựng hai bảng Parquet đầu ra `papers.parquet` và `references.parquet` theo đúng schema quy định.
+   - Đo lường và tổng hợp hiệu năng (thời gian, RAM đỉnh, dung lượng đĩa) theo từng phiên chạy trên Google Colab qua `src/crawler/m1_aggregate.py`.
+
+2. **Milestone 2 — LaTeX Parsing & Normalization (`src/run_m2.py`):**
+   - **Step `bib`:** Trích xuất mục trích dẫn từ file `.bib` và môi trường `\bibitem` trong `.tex`, chuẩn hóa tiêu đề/tác giả, hợp nhất chéo version thành `bibtex_merged.json` và sinh bản đồ ánh xạ `cite_map.json`. Sinh chỉ mục ứng viên và `candidates.json` cho M3.
+   - **Step `tree`:** Xác định file gốc tài liệu, mở rộng đệ quy `\input` và `\include`, mở rộng macro người dùng (`\newcommand`, `\def`), trích xuất cấu trúc phân cấp tài liệu (section, paragraph, itemize, equation, figure) thành `tree_raw.json`.
+   - **Step `content`:** Làm sạch văn bản LaTeX (loại bỏ comment, chuẩn hóa toán inline `MATH_` / block `EQ_`, bảo tồn lệnh `\cite{...}`), phân tách câu (`nltk.punkt`), cập nhật các khóa trích dẫn theo khóa chuẩn hóa trong `cite_map.json`, và khử trùng lặp nội dung chéo version thành `elements.json` và `hierarchy.json`.
+   - **Export Parquet:** Xuất 3 bảng Parquet chuẩn hóa `elements.parquet`, `hierarchy.parquet`, và `bibtex.parquet` vào thư mục `<corpus>/export/`.
+
+3. **Milestone 3 — Citation Matching (`src/run_m3.py`):**
+   - Ghép nối các mục BibTeX trong bài báo với các tài liệu tham khảo (references) thực tế từ Semantic Scholar / arXiv.
+   - Trích xuất đặc trưng chuỗi (Levenshtein, Jaro-Winkler, token overlap, difflib ratio) và đặc trưng ngữ cảnh từ các câu trích dẫn trong `elements`.
+   - Gán nhãn thủ công (`manual_labels.csv`) và tự động (`auto_labels.csv`), huấn luyện mô hình phân loại và đánh giá xếp hạng theo độ đo **MRR@5**.
+   - Xuất bản bộ dữ liệu hoàn chỉnh lên Hugging Face Hub.
+
+---
+
+## 2. Cấu trúc Repository
 
 ```text
-src/
-├── run_m1.py              # điểm chạy chính (discovery + crawl + bảng + benchmark)
-├── requirements.txt
-├── crawler/
-│   ├── m1_download.py     # tải và trích .tex/.bib từ archive
-│   ├── m1_references.py   # gọi Semantic Scholar, chuẩn hóa reference
-│   ├── m1_tables.py       # dựng papers.parquet / references.parquet
-│   └── m1_aggregate.py    # gộp log benchmark của nhiều phiên Colab
-└── utils/
-    ├── config.py          # đường dẫn, hằng số, biến môi trường
-    ├── schemas.py         # schema pyarrow của các bảng
-    └── benchmark.py       # PerfRecorder: đo thời gian, RAM, đĩa
+arxiv-project/
+├── data/                             # Dữ liệu cục bộ (được .gitignore, KHÔNG commit)
+│   ├── papers.parquet, papers.csv
+│   ├── references.parquet, references.csv
+│   ├── export/                       # Đầu ra Parquet của M2
+│   │   ├── elements.parquet
+│   │   ├── hierarchy.parquet
+│   │   └── bibtex.parquet
+│   ├── benchmark/                    # Log hiệu năng từng phiên & tổng hợp
+│   └── <paper_key>/                  # Dữ liệu chi tiết từng bài báo (2310-12345)
+├── docs/                             # Tài liệu kỹ thuật chi tiết theo chuẩn đề
+│   ├── 00_project_overview.md        # Tổng quan đồ án, yêu cầu đề, tiến độ
+│   ├── 01_system_architecture.md     # Kiến trúc hệ thống, luồng dữ liệu Mermaid
+│   ├── 02_data_contracts.md          # Đặc tả JSON trung gian và schema 6 bảng Parquet
+│   ├── 03_m1_crawling.md             # Tài liệu kỹ thuật Milestone 1
+│   ├── 04_m2_parsing.md              # Tài liệu kỹ thuật Milestone 2
+│   ├── 05_m3_matching.md             # Tài liệu kỹ thuật Milestone 3
+│   ├── 06_integration.md             # Hướng dẫn tích hợp liên milestone & run order
+│   ├── 07_testing_and_performance.md # Kiểm thử và phân tích số liệu benchmark
+│   ├── 08_development_log.md         # Nhật ký phát triển, commit history, lỗi đã sửa
+│   ├── CHANGELOG_M1_M2.md            # Tổng kết cải tiến & bản vá PR #18/#19
+│   └── README.md
+├── src/                              # Toàn bộ mã nguồn thực thi
+│   ├── run_m1.py                     # Điểm chạy chính M1 (crawl + tables + bench)
+│   ├── run_m2.py                     # Điểm chạy chính M2 (bib + tree + content + export)
+│   ├── run_m3.py                     # Điểm chạy chính M3 (matching + evaluation)
+│   ├── requirements.txt              # Danh sách thư viện Python cần thiết
+│   ├── crawler/                      # Pipeline Milestone 1
+│   │   ├── m1_download.py            # Tải archive arXiv, trích .tex/.bib
+│   │   ├── m1_references.py          # Batch API Semantic Scholar, chuẩn hóa ref
+│   │   ├── m1_tables.py              # Dựng bảng papers.parquet & references.parquet
+│   │   └── m1_aggregate.py           # Gộp log benchmark từ nhiều phiên Colab
+│   ├── parser/                       # Pipeline Milestone 2
+│   │   ├── m2_gather.py              # Thu thập file TeX, giải nén, scan cây
+│   │   ├── m2_bibitem.py             # Trích xuất bibitem từ file .tex
+│   │   ├── m2_bib_dedup.py           # Phân tích BibTeX & gộp chéo version
+│   │   ├── m2_hierarchy.py           # Xây dựng cây phân cấp document (tree_raw.json)
+│   │   ├── m2_cleanup.py             # Khử macro, chuẩn hóa toán, làm sạch text
+│   │   ├── m2_sentences.py           # Tách câu (NLTK) & đổi tên khóa trích dẫn
+│   │   └── m2_content_dedup.py       # Khử trùng lặp nội dung chéo version
+│   ├── matching/                     # Pipeline Milestone 3
+│   │   ├── m3_candidates.py          # Tạo cặp ứng viên BibTeX - Reference
+│   │   ├── m3_string_features.py     # Đặc trưng so khớp chuỗi
+│   │   ├── m3_context_features.py    # Đặc trưng ngữ cảnh từ câu trích dẫn
+│   │   ├── m3_auto_labeler.py        # Tự động sinh nhãn
+│   │   ├── m3_model.py               # Huấn luyện mô hình xếp hạng
+│   │   ├── m3_evaluate.py            # Đánh giá độ đo MRR@5
+│   │   └── m3_publish_hf.py          # Đóng gói và đẩy dataset lên Hugging Face
+│   ├── utils/                        # Tiện ích chung & cấu hình
+│   │   ├── config.py                 # Đường dẫn chuẩn, hằng số, biến môi trường
+│   │   ├── schemas.py                # Schema PyArrow 6 bảng & export Parquet
+│   │   └── benchmark.py              # PerfRecorder đo RAM, đĩa, thời gian
+│   └── tests/                        # Bộ kiểm thử tự động (162 tests)
+└── pytest.ini
 ```
 
-Repo chỉ chứa mã nguồn. **Không commit thư mục dữ liệu** (corpus, parquet, benchmark).
+---
 
-## 2. Cài đặt
+## 3. Chuẩn bị môi trường & Cài đặt
 
-Yêu cầu: Python 3.10 trở lên.
+Yêu cầu: **Python 3.10 trở lên**.
+
+### 3.1 Cài đặt trên máy cá nhân
+
+Tạo môi trường ảo và cài đặt dependencies:
 
 ```bash
-git clone <repo-url> && cd <repo>
+git clone https://github.com/Harryyy603002/arxiv-project.git
+cd arxiv-project
+python -m venv .venv
+
+# Kích hoạt môi trường ảo:
+# Windows (PowerShell): .venv\Scripts\Activate.ps1
+# Linux / macOS:        source .venv/bin/activate
+
 pip install -r src/requirements.txt
 ```
 
-Biến môi trường (có thể đặt trong file `.env` ở thư mục gốc; `python-dotenv` sẽ tự đọc):
+### 3.2 Cấu hình biến môi trường
 
-| Biến | Bắt buộc | Ý nghĩa |
-|---|---|---|
-| `CONTACT_EMAIL` | Có | Email thật, đưa vào User-Agent để arXiv liên hệ khi cần. |
-| `S2_API_KEY` | Nên có | Key miễn phí của Semantic Scholar. Không có key sẽ chậm và dễ bị lỗi 429. Trên Colab có thể lưu trong Secrets với tên `S2_API_KEY`. |
-| `ARXIV_DATA_DIR` | Không | Thư mục dữ liệu mặc định (mặc định `<repo>/data`). Có thể ghi đè bằng `--corpus-dir`. |
+Tạo file `.env` ở thư mục gốc (file này đã có trong `.gitignore`, **tuyệt đối không commit API key**):
 
 ```bash
-export CONTACT_EMAIL="ten@domain.com"
-export S2_API_KEY="xxxxxxxx"
+# Bắt buộc: Email thật để đưa vào User-Agent liên hệ khi tải từ arXiv
+CONTACT_EMAIL=ten_cua_ban@domain.com
+
+# Khuyến nghị: Key miễn phí của Semantic Scholar (tránh lỗi HTTP 429 và tăng tốc rate limit)
+S2_API_KEY=s2_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Tùy chọn: Thư mục lưu trữ dữ liệu (mặc định là ./data)
+ARXIV_DATA_DIR=./data
 ```
 
-> **Quy tắc arXiv đã được tuân thủ trong code:** chỉ dùng `export.arxiv.org`, một kết nối duy nhất, cách nhau ít nhất 3 giây giữa hai request, có User-Agent mô tả rõ. Đừng sửa các thông số này để chạy nhanh hơn, vì sẽ bị chặn 403 và vi phạm đề.
+> **Tuân thủ quy định crawler của arXiv:** Hệ thống tuân thủ nghiêm ngặt chính sách của arXiv: chỉ truy vấn `export.arxiv.org`, duy trì duy nhất 1 kết nối tuần tự, giãn cách tối thiểu 3 giây giữa hai lượt tải source, và gắn User-Agent định danh rõ ràng kèm email. Không được phép chỉnh sửa hạ thấp độ trễ 3s để tránh bị cấm IP (HTTP 403).
 
-## 3. Chuẩn bị danh sách ID
+### 3.3 Chạy trên Google Colab
 
-`--ids-file` là file văn bản (ví dụ `ID.txt`), mỗi dòng là **một arXiv ID** hoặc **một khoảng ID** của giảng viên giao. Cả hai dạng viết đều được:
-
-```text
-260204870-260209869        # viết liền: YYMM + 5 chữ số, tức 2602.04870 đến 2602.09869 (5 000 ID)
-2602.04870-2602.09869      # viết có dấu chấm
-2310.12345                 # một ID đơn
-hep-th/9901001             # ID kiểu cũ
-```
-
-Dòng bắt đầu bằng `#` bị bỏ qua. File có BOM hay xuống dòng kiểu Windows vẫn đọc được; dòng không hợp lệ bị bỏ qua và báo số dòng.
-
-**Khoảng ID đi qua nhiều tháng** (ví dụ `251223231-260103155`, từ 2512.23231 sang 2601.03155) cần thêm ID cuối của tháng đầu bằng `--month-last`:
-
-```bash
---month-last 2512=25075
-```
-
-Nếu thiếu, chương trình dừng và báo `Thiếu ID cuối của tháng 2512`. Số 25075 trên đây suy ra từ việc mỗi khoảng có đúng 5 000 ID (25075 − 23231 + 1 + 3155 = 5000); hãy kiểm tra bằng arXiv API (2512.25075 phải tồn tại, 2512.25076 thì không):
+Mở notebook mới và thực hiện theo từng cell:
 
 ```python
-import arxiv
-client = arxiv.Client()
-for i in ["2512.25075", "2512.25076"]:
-    print(i, bool(list(client.results(arxiv.Search(id_list=[i])))))   # mong đợi: True, False
+# 1. Mount Google Drive để lưu trữ và backup dữ liệu bền vững
+from google.colab import drive, userdata
+import os
+drive.mount("/content/drive")
+
+# 2. Đặt cấu hình môi trường
+os.environ["CONTACT_EMAIL"] = "ten_cua_ban@domain.com"
+os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")  # Lưu trong mục Secrets của Colab
+
+# 3. Clone repo và cài dependencies
+!git clone https://github.com/Harryyy603002/arxiv-project.git
+%cd arxiv-project
+!pip install -q -r src/requirements.txt
 ```
 
-Muốn dùng riêng một bộ ID thử nhanh, thêm `--limit N` (N ID đầu) hoặc `--sample N` (N ID cách đều trên toàn bộ danh sách, đại diện hơn).
+---
 
-## 4. Chạy
+## 4. Quy định dữ liệu & Thỏa thuận giao diện (Data Contracts)
 
-Luôn chạy từ **thư mục gốc repo**.
+### 4.1 Quy tắc chung về dữ liệu
 
-**Bước 1: chạy thử 3 bài** (nên làm trước khi chạy thật):
+- Thư mục `data/` chứa toàn bộ dữ liệu thô, corpus và Parquet. **Nghiêm cấm commit bất kỳ dữ liệu nào vào Git** (kể cả CSV nhãn hoặc log tạm).
+- Tên thư mục bài báo tuân theo quy ước `<paper_key>`: thay thế tất cả dấu `.` và `/` trong arXiv ID bằng dấu `-` (ví dụ `2310.12345` → `2310-12345`, `hep-th/9901001` → `hep-th-9901001`).
+- Trong nội dung các file JSON và Parquet, trường `arxiv_id` **luôn luôn giữ nguyên định dạng arXiv ID gốc**.
+- Luôn sử dụng các hàm dựng đường dẫn tập trung trong `src/utils/config.py` (`paper_dir`, `version_dir`, `papers_parquet_path`, `cite_map_path`, v.v.).
 
-```bash
-printf "1706.03762\n1810.04805\n1512.03385\n" > ids_test.txt
-python src/run_m1.py --ids-file ids_test.txt --corpus-dir ./data_test
+### 4.2 Cấu trúc thư mục dữ liệu hoàn chỉnh
+
+```text
+data/                                      # Thư mục gốc dữ liệu (DATA_DIR)
+├── papers.parquet, papers.csv             # Bảng papers tổng hợp M1
+├── references.parquet, references.csv     # Bảng references tổng hợp M1 (chỉ giữ ref có arXiv ID)
+├── references_stats.json                  # Thống kê số lượng reference tổng / có arXiv ID / trùng
+├── refs_failures.jsonl                    # Log các bài lỗi Semantic Scholar cần thử lại
+├── discovery_cache.json                   # Cache metadata từ arXiv API phục vụ resume
+├── export/                                # Đầu ra 3 bảng Parquet chuẩn hóa của M2
+│   ├── elements.parquet                   # Bảng các phần tử văn bản đã làm sạch, khử trùng lặp
+│   ├── hierarchy.parquet                  # Bảng quan hệ cây phân cấp nút - cha
+│   └── bibtex.parquet                     # Bảng mục trích dẫn BibTeX đã chuẩn hóa & gộp version
+├── labels/                                # Nhãn phục vụ huấn luyện và đánh giá M3
+│   ├── manual_labels.csv                  # Nhãn gán thủ công (tối thiểu 100 cặp)
+│   └── auto_labels.csv                    # Nhãn sinh tự động (≥ 10% số bài ngoài tập tay)
+├── benchmark/                             # Nhật ký đo lường hiệu năng
+│   ├── session_001.json                   # Số liệu chi tiết từng phiên chạy Colab
+│   ├── session_002.json
+│   ├── sessions.csv                       # Tổng kết các phiên (thời gian, RAM, CPU, đĩa)
+│   └── benchmark_m1_total.json            # Bản tổng hợp hiệu năng M1 cuối cùng đưa vào báo cáo
+└── <paper_key>/                           # Thư mục cho từng bài báo (ví dụ: 2310-12345/)
+    ├── paper.json                         # Metadata cấp bài báo (từ arXiv API)
+    ├── refs.json                          # Toàn bộ reference đã chuẩn hóa (cả có và không có arXiv ID)
+    ├── refs_raw.json                      # Phản hồi gốc từ Semantic Scholar Graph API
+    ├── cite_map.json                      # Bản đồ ánh xạ citation key cũ -> citation key chuẩn hóa
+    ├── bibtex_entries_raw.json            # Toàn bộ mục BibTeX thô trích xuất từ .bib và \bibitem
+    ├── bibtex_merged.json                 # Các mục BibTeX đã hợp nhất xuyên suốt các version
+    ├── candidate_entry_index.json         # Danh sách chỉ mục phục vụ sinh ứng viên M3
+    ├── candidates.json                    # Cặp ứng viên (BibTeX entry - Reference) kèm similarity
+    ├── elements.json                      # Các phần tử văn bản (paragraph, item, math, ...) sau khử trùng
+    ├── hierarchy.json                     # Danh sách cạnh nút - cha cho từng version
+    ├── m2_stats.json                      # Thống kê chi tiết quá trình parse M2 của bài
+    └── vN/                                # Thư mục version (v1, v2, ...; bản rỗng nếu chỉ có PDF)
+        ├── *.tex, *.bib                   # Mã nguồn TeX và file thư viện đã lọc sạch ảnh
+        ├── metadata.json                  # Metadata version, trạng thái tải, dung lượng byte trước/sau
+        ├── references.json                # Bản sao danh sách references của version
+        └── tree_raw.json                  # Cây cấu trúc tài liệu thô trước khi làm sạch text
 ```
 
-Hoặc thử 50 ID cách đều trong khoảng của nhóm:
+### 4.3 Thỏa thuận giao diện trao đổi giữa các thành viên
+
+| # | Từ → Đến | File dữ liệu | Quy cách & Nội dung chính |
+| --- | --- | --- | --- |
+| 1 | M1 → Cả nhóm | `<paper_key>/paper.json` | `arxiv_id, title, authors, submission_date, revised_dates, venue, n_versions` |
+| 2 | M1 → Cả nhóm | `<paper_key>/vN/metadata.json` | `arxiv_id, version, date, title, authors, venue, source_kind, archive_bytes, bytes_before, bytes_after` |
+| 3 | M1 → Cả nhóm | `<paper_key>/refs.json` | Danh sách toàn bộ reference crawl từ Semantic Scholar |
+| 4 | M1 → Báo cáo | `data/papers.parquet`, `references.parquet` | Bảng papers và bảng references tổng hợp toàn bộ tập ID phân công |
+| 5 | P1 → P3 | `<paper_key>/vN/tree_raw.json` | Cây phân cấp thô chứa các khối block `document`, `section`, `paragraph`, `equation`, `figure` |
+| 6 | P2 → P3, P4 | `<paper_key>/cite_map.json`, `bibtex_merged.json` | Ánh xạ đổi tên khóa trích dẫn và bảng BibTeX đã gộp chéo version |
+| 7 | P3 → P4 | `<paper_key>/elements.json`, `hierarchy.json` | Văn bản đã tách câu, giữ nguyên `\cite{...}`, đổi khóa chuẩn, và bảng cạnh cây phân cấp |
+| 8 | P4 → Báo cáo | `data/export/*.parquet` | 3 bảng Parquet M2: `elements.parquet`, `hierarchy.parquet`, `bibtex.parquet` |
+| 9 | Cả nhóm | `labels/manual_labels.csv`, `auto_labels.csv` | Cột: `arxiv_id, citation_key, groundtruth_arxiv_id` |
+
+---
+
+## 5. Phân công & Khoảng ID phụ trách
+
+### 5.1 Phân công vai trò
+
+| Mã | Thành viên | Mảng phụ trách | Nhiệm vụ trọng tâm |
+| --- | --- | --- | --- |
+| **P1** | Quoc | Source & Structure | Tải source TeX, bóc tách cấu trúc tài liệu, dựng cây `tree_raw.json` |
+| **P2** | Tri | References & BibTeX | Thu thập reference Semantic Scholar, bóc tách `\bibitem` / `.bib`, hợp nhất BibTeX |
+| **P3** | Nguyen | Text & Normalization | Làm sạch văn bản TeX, tách câu, đổi khóa `\cite`, khử trùng lặp nội dung `elements` |
+| **P4** | Khai | Data, Model & Delivery | Đóng gói Parquet, sinh feature so khớp, gán nhãn, huấn luyện mô hình M3, xuất bản HF |
+
+### 5.2 Khoảng ID được phân công thực tế
+
+Mỗi thành viên phụ trách một dải 5.000 ID độc lập:
+
+| Thành viên | Khoảng ID thực tế | Số lượng | Ghi chú & Tham số đặc biệt |
+| --- | --- | --- | --- |
+| **Quoc** | `2512.23231` → `2601.03155` | 5.000 | Khoảng đi qua 2 tháng. Cần thêm `--month-last 2512=25075` |
+| **Nguyen** | `2602.04870` → `2602.09869` | 5.000 | Trong cùng tháng `2602` |
+| **Khai** | `2603.00580` → `2603.05579` | 5.000 | Trong cùng tháng `2603` |
+| **Tri** | `2606.20734` → `2606.25733` | 5.000 | Trong cùng tháng `2606` |
+
+**Quy cách ID đầu vào (`--ids-file` hoặc `--ids`):**
+Hỗ trợ truyền qua file (`--ids-file`) hoặc trực tiếp từ dòng lệnh (`--ids`). Mỗi mục có thể là:
+
+- Một khoảng ID có dấu chấm: `2606.20734-2606.25733`
+- Một khoảng ID viết liền: `260620734-260625733`
+- Một ID đơn: `2310.12345` hoặc ID cũ `hep-th/9901001`
+- Trong file, dòng bắt đầu bằng `#` được xem là comment và tự động bỏ qua.
+
+---
+
+## 6. Hướng dẫn chạy Pipeline
+
+### 6.1 Milestone 1: Thu thập dữ liệu (`src/run_m1.py`)
+
+#### Bước 1: Chạy thử nghiệm nhanh (3 bài hoặc 50 bài lấy mẫu)
 
 ```bash
-python src/run_m1.py --ids-file ID.txt --month-last 2512=25075 --sample 50 --corpus-dir ./data_sample
+# Thử nghiệm 3 ID tiêu biểu
+printf "1706.03762\n1810.04805\n1512.03385\n" > test_ids.txt
+python src/run_m1.py --ids-file test_ids.txt --corpus-dir ./data_test
+
+# Hoặc lấy mẫu 50 ID cách đều trong khoảng ID phân công
+python src/run_m1.py --ids-file ID.txt --sample 50 --corpus-dir ./data_sample
 ```
 
-Kiểm tra `data_test/` có source, `paper.json`, `refs.json`, hai file `.parquet` và thư mục `benchmark/` (xem mục 5).
-
-**Bước 2: chạy toàn bộ:**
+#### Bước 2: Chạy toàn bộ dữ liệu trên máy cá nhân
 
 ```bash
+# Tạo thư mục log
 mkdir -p data/logs
-nohup python src/run_m1.py --ids-file ID.txt --month-last 2512=25075 --corpus-dir ./data \
+
+# Chạy ngầm bằng nohup
+nohup python src/run_m1.py --ids-file ID.txt --corpus-dir ./data \
     > data/logs/session_001.log 2>&1 &
+
+# Theo dõi tiến trình
 tail -f data/logs/session_001.log
 ```
 
-Các tùy chọn:
+*(Nếu là dải ID của Quoc, hãy thêm cờ `--month-last 2512=25075`).*
 
-| Tùy chọn | Tác dụng |
-|---|---|
-| `--month-last YYMM=N` | ID cuối của tháng, cho khoảng ID đi qua nhiều tháng (vd. `2512=25075`). |
-| `--limit N` / `--sample N` | Chỉ lấy N ID đầu / N ID cách đều (dùng để chạy thử). |
-| `--batch-size 25` | Số bài mỗi batch gọi Semantic Scholar. |
-| `--backup-dir <dir>` | Sao lưu từng batch và log các phiên vào thư mục này (ví dụ Google Drive). |
-| `--bench-dir <dir>` | Thư mục log từng phiên (mặc định `<corpus-dir>/benchmark`). |
-| `--no-discovery-cache` | Không đọc/ghi `discovery_cache.json` (mất khả năng resume discovery). |
-| `--force-refs` | Gọi lại Semantic Scholar kể cả bài đã có refs. |
-| `--skip-tables` | Không dựng `papers/references.parquet`. |
-| `--user-agent "..."` | Ghi đè User-Agent (mặc định lấy từ `CONTACT_EMAIL`). |
+#### Bước 3: Chạy nhiều phiên trên Google Colab & Tự động gộp Benchmark
 
-### Chạy lại / tiếp tục sau khi bị ngắt
-
-Chỉ cần chạy lại **đúng lệnh cũ**. Chương trình bỏ qua phần đã xong:
-
-- version đã có `vN/metadata.json` (không tải lại source);
-- bài đã có cả `refs.json` và `refs_raw.json` (không gọi lại Semantic Scholar);
-- ID đã có trong `discovery_cache.json` (không hỏi lại arXiv API).
-
-Version tải lỗi (mạng, 5xx) không được ghi checkpoint nên lần chạy sau sẽ tự thử lại.
-
-### Chạy nhiều phiên Google Colab
-
-Thầy đã xác nhận: số liệu hiệu năng **đo trên Google Colab**, được **chia thành nhiều phiên** nếu vượt giới hạn 12 giờ, với điều kiện **giữ log thời gian từng phiên** và **ghi rõ trong Jupyter Book** cách tổng hợp. Code hỗ trợ việc này như sau:
-
-- Mỗi lần chạy `run_m1.py` là một phiên, ghi log riêng `benchmark/session_NNN.json` (số thứ tự tự tăng).
-- Log được cập nhật sau mỗi batch (tối đa mỗi phút một lần) và khi gặp lỗi/Ctrl+C, nên phiên bị ngắt vẫn để lại số liệu gần nhất (`status` là `running` hoặc `interrupted`). Chỉ phần thời gian từ lần ghi cuối đến lúc bị ngắt đột ngột (tối đa khoảng một batch) là không được tính.
-- Cuối mỗi phiên, `crawler/m1_aggregate.py` tự gộp mọi phiên vào `benchmark/benchmark_m1_total.json` và `benchmark/sessions.csv`. Có thể chạy tay: `python src/crawler/m1_aggregate.py --data-dir ./data`.
-- **Không xóa các file `session_*.json`.** Dùng `--backup-dir` để chúng được sao lưu cùng dữ liệu.
-
-Quy trình mỗi phiên trên Colab (phiên đầu bỏ bước khôi phục):
+Google Colab giới hạn thời gian chạy liên tục (12 giờ). Nhóm áp dụng quy trình chia phiên và tự động sao lưu vào Google Drive:
 
 ```python
+# Script chạy trên Colab
 from google.colab import drive, userdata
 import os
 drive.mount('/content/drive')
@@ -151,171 +295,159 @@ os.environ["CONTACT_EMAIL"] = "ten@domain.com"
 os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
 
 BACKUP = "/content/drive/MyDrive/arxiv_backup"
-!git clone <repo-url> && pip install -q -r <repo>/src/requirements.txt
-# Phiên 2 trở đi: khôi phục dữ liệu và log các phiên trước
 !mkdir -p /content/corpus && [ -d {BACKUP} ] && cp -r {BACKUP}/. /content/corpus/ || true
 !mkdir -p {BACKUP}/logs
-# Số phiên (NNN) khớp với số thứ tự tự tăng của benchmark/session_NNN.json
-!cd <repo> && python src/run_m1.py --ids-file ID.txt --month-last 2512=25075 --corpus-dir /content/corpus \
-    --backup-dir {BACKUP} 2>&1 | tee {BACKUP}/logs/session_002.log
+
+# Chạy crawler kèm sao lưu tự động sau từng batch
+!python src/run_m1.py --ids-file ID.txt --corpus-dir /content/corpus \
+    --backup-dir {BACKUP} 2>&1 | tee {BACKUP}/logs/session_001.log
 ```
 
-Cuối cùng, `/content/corpus/benchmark/benchmark_m1_total.json` là số liệu tổng hợp để đưa vào báo cáo; `sessions.csv` là bảng từng phiên (giờ bắt đầu, thời gian chạy, số version mới tải, RAM đỉnh, cấu hình máy, `is_colab`).
+Cuối mỗi phiên, `src/crawler/m1_aggregate.py` tự động tổng hợp toàn bộ các file `session_*.json` thành `benchmark_m1_total.json` và `sessions.csv`. Có thể chạy tổng hợp thủ công bất kỳ lúc nào:
 
-#### Quy tắc gộp số liệu giữa các phiên
-
-| Số liệu | Cách gộp |
-|---|---|
-| Tổng thời gian chạy, thời gian discovery, thời gian từng giai đoạn | **Cộng** qua các phiên (không tính khoảng nghỉ giữa các phiên). |
-| Thời gian xử lý trung bình/lớn nhất một bài | Cộng thời gian của bài qua các phiên, rồi lấy trung bình/cực đại. |
-| RAM đỉnh, đĩa đỉnh | **Cực đại** qua các phiên. |
-| RAM trung bình | Trung bình có trọng số theo số mẫu của từng phiên. |
-| Dung lượng đầu ra cuối | Tính lại từ thư mục dữ liệu. |
-| Tỉ lệ thành công, kích thước trước/sau bỏ hình, số reference trung bình | Lấy từ **phiên hoàn tất cuối cùng**, vì phiên đó duyệt lại toàn bộ danh sách ID. |
-
-## 5. Cấu trúc thư mục dữ liệu sau khi crawl
-
-Ví dụ **minh họa** (định dạng file là thật; nội dung lấy từ lần chạy thử với dữ liệu giả). Bài `2301.00001` có 2 version, bài `2301.00002` chỉ có PDF. ID cũ như `hep-th/9901001` được lưu ở thư mục `hep-th-9901001/`.
-
-```text
-data/                                  # = --corpus-dir = ARXIV_DATA_DIR
-├── 2301-00001/                        # một thư mục mỗi bài: <paper_key>
-│   ├── paper.json                     # metadata cấp bài
-│   ├── refs.json                      # toàn bộ reference đã chuẩn hóa (cả loại không có arXiv ID)
-│   ├── refs_raw.json                  # phản hồi gốc của Semantic Scholar
-│   ├── v1/
-│   │   ├── main.tex                   # chỉ .tex và .bib, giữ nguyên đường dẫn con (sections/intro.tex...)
-│   │   ├── refs.bib
-│   │   ├── metadata.json              # trạng thái tải + số byte (đồng thời là checkpoint của version)
-│   │   └── references.json            # bản sao references cho version này
-│   └── v2/ ...
-├── 2301-00002/                        # bài chỉ có PDF
-│   └── v1/metadata.json               # bản ghi rỗng, không có .tex
-├── hep-th-9901001/ ...                # ID cũ giữ nguyên trong file, "/" đổi thành "-" ở tên thư mục
-├── discovery_cache.json               # kết quả tra arXiv API (phục vụ resume)
-├── papers.parquet, papers.csv         # bảng papers (schema đề)
-├── references.parquet, references.csv # bảng references (chỉ reference có arXiv ID)
-├── references_stats.json              # số reference tổng / có arXiv ID / trùng
-├── refs_failures.jsonl                # (nếu có) bài Semantic Scholar trả lỗi, sẽ gọi lại ở lần sau
-├── benchmark/
-│   ├── session_001.json               # log của từng phiên Colab (GIỮ LẠI để đối chiếu)
-│   ├── session_002.json
-│   ├── benchmark_m1_total.json        # số liệu tổng hợp mọi phiên (dùng cho báo cáo)
-│   └── sessions.csv                   # một dòng mỗi phiên
-└── logs/                              # (tùy chọn) log console của từng phiên: session_NNN.log
+```bash
+python src/crawler/m1_aggregate.py --data-dir ./data
 ```
 
-**`paper.json`**
+#### Bảng tham số CLI của `src/run_m1.py`
 
-```json
-{
-  "arxiv_id": "2301.00001",
-  "title": "...",
-  "authors": ["A B"],
-  "submission_date": "2023-01-01T00:00:00+00:00",
-  "revised_dates": ["2023-01-02T00:00:00+00:00"],
-  "venue": null,
-  "n_versions": 2
-}
+| Tham số | Ý nghĩa & Hướng dẫn sử dụng |
+| --- | --- |
+| `--ids-file PATH` | Đường dẫn file chứa danh sách arXiv ID hoặc khoảng ID (truyền `--ids-file` hoặc `--ids`). |
+| `--ids [ID ...]` | Danh sách arXiv ID hoặc khoảng ID trực tiếp từ dòng lệnh (vd: `2606.20734-2606.25733`). |
+| `--month-last YYMM=N` | Khai báo ID cuối của tháng đối với dải ID vắt qua 2 tháng (vd: `2512=25075`). |
+| `--limit N` | Chỉ crawl N bài đầu tiên trong danh sách (dùng khi kiểm tra nhanh). |
+| `--sample N` | Lấy N bài cách đều trên toàn dải ID (cho mẫu kiểm tra có tính đại diện cao). |
+| `--corpus-dir PATH` | Thư mục lưu trữ dữ liệu (mặc định: `./data`). |
+| `--batch-size 25` | Số bài trong một đợt gửi API Semantic Scholar (mặc định: 25). |
+| `--backup-dir PATH` | Thư mục sao lưu (Google Drive); tự động copy dữ liệu và log sau mỗi batch. |
+| `--bench-dir PATH` | Thư mục lưu trữ log phiên benchmark (mặc định: `<corpus-dir>/benchmark`). |
+| `--no-discovery-cache` | Tắt tính năng lưu/đọc `discovery_cache.json` (không khuyến nghị). |
+| `--force-refs` | Ép buộc gọi lại Semantic Scholar ngay cả khi bài đã có `refs.json`. |
+| `--skip-tables` | Bỏ qua bước xuất `papers.parquet` và `references.parquet`. |
+
+#### Cơ chế khôi phục (Resume)
+
+Chỉ cần chạy lại đúng câu lệnh cũ. Hệ thống tự động bỏ qua các phần việc đã hoàn thành:
+
+- Version đã có `vN/metadata.json` sẽ không tải lại source.
+- Bài báo đã có đủ `refs.json` và `refs_raw.json` sẽ không gọi lại Semantic Scholar API.
+- ID đã có trong `discovery_cache.json` sẽ không tra cứu lại arXiv API.
+
+---
+
+### 6.2 Milestone 2: Phân tích & Chuẩn hóa LaTeX (`src/run_m2.py`)
+
+Sau khi M1 thu thập xong source TeX và references, M2 tiến hành trích xuất cấu trúc và nội dung:
+
+```bash
+# Chạy đầy đủ cả 3 bước (bib -> tree -> content) trên toàn bộ corpus:
+python src/run_m2.py --corpus-dir ./data
+
+# Chạy M2 và tự động xuất các bảng Parquet vào data/export/:
+python src/run_m2.py --corpus-dir ./data --export
+
+# Chỉ chạy xuất Parquet từ kết quả đã parse xong trước đó (không parse lại):
+python src/run_m2.py --corpus-dir ./data --export-only
 ```
 
-**`v2/metadata.json`** (version có TeX; `status="ok"`)
+#### Các tùy chọn linh hoạt cho M2
 
-```json
-{
-  "arxiv_id": "2301.00001v2", "version": 2, "date": "2023-01-02T00:00:00+00:00",
-  "status": "ok", "reason": "", "files": ["main.tex", "refs.bib"],
-  "archive_bytes": 244, "bytes_before": 20076, "bytes_after": 76
-}
+```bash
+# Chỉ chạy riêng lẻ bước xử lý BibTeX (bước 1):
+python src/run_m2.py --steps bib
+
+# Chỉ chạy bước dựng cây cấu trúc (bước 2):
+python src/run_m2.py --steps tree
+
+# Chỉ chạy bước làm sạch và tách câu văn bản (bước 3):
+python src/run_m2.py --steps content
+
+# Chỉ chạy thử trên một vài ID bài báo cụ thể:
+python src/run_m2.py --ids 2310.12345 2606.20734
+
+# Bỏ qua những bài đã có m2_stats.json và elements.json (chạy tiếp tục khi bị dừng):
+python src/run_m2.py --skip-existing
 ```
 
-`bytes_before` là tổng kích thước mọi file trong archive, còn `bytes_after` là tổng kích thước `.tex` và `.bib` còn giữ lại. Hai số này dùng để tính kích thước trung bình trước/sau khi bỏ hình.
+#### Ba bước xử lý của M2 (`--steps bib,tree,content`)
 
-**Bản ghi rỗng** (version chỉ có PDF, ví dụ `2301-00002/v1/metadata.json`)
+1. **`bib` (P2):** Quét toàn bộ file `.bib` và khối `\begin{thebibliography}` / `\bibitem` trong tất cả file `.tex`. Chuẩn hóa tiêu đề, tác giả, năm; gộp các mục trùng giữa các version; sinh `cite_map.json` ánh xạ các citation key cũ về canonical key; sinh `candidates.json` cho M3.
+2. **`tree` (P1):** Tìm file TeX chính (`\documentclass`), phân giải đệ quy `\input` và `\include`, mở rộng macro người dùng (`m2_cleanup.expand_user_macros`), xây dựng cây cấu trúc phân cấp tài liệu lưu vào `tree_raw.json`.
+3. **`content` (P3):** Duyệt cây cấu trúc, làm sạch văn bản (loại bỏ comment TeX, thay toán inline bằng token `MATH_...`, toán khối bằng `EQ_...`), tách câu bằng NLTK, đổi tên các lệnh `\cite{...}` theo `cite_map.json`, khử trùng lặp nội dung chéo version và ghi ra `elements.json` cùng `hierarchy.json`.
+4. **`export` (P4):** Kiểm tra tính toàn vẹn dữ liệu (`validate_m2_integrity`) và xuất 3 bảng Parquet vào `<corpus>/export/`:
+   - `elements.parquet`: `element_id, arxiv_id, kind, content`
+   - `hierarchy.parquet`: `arxiv_id, version, element_id, parent_id` (nút gốc có `parent_id` rỗng được lược bỏ theo đúng đặc tả)
+   - `bibtex.parquet`: `arxiv_id, citation_key, entry_type, title, authors, year, doi, journal, url`
 
-```json
-{
-  "arxiv_id": "2301.00002v1", "version": 1, "status": "empty", "reason": "pdf_only",
-  "files": [], "archive_bytes": 13, "bytes_before": 13, "bytes_after": 0
-}
+---
+
+### 6.3 Milestone 3: Ghép nối trích dẫn (`src/run_m3.py`)
+
+- **Đầu vào:** `data/export/bibtex.parquet`, `data/references.parquet`, `data/export/elements.parquet`, và file nhãn trong `data/labels/`.
+- **Dữ liệu nhãn:**
+  - `data/labels/manual_labels.csv` và `data/labels/auto_labels.csv`.
+  - Cột: `arxiv_id, citation_key, groundtruth_arxiv_id` (để trống nếu không tìm thấy arXiv ID tương ứng).
+  - Tối thiểu 100 cặp nhãn gán tay từ ít nhất 5 bài báo (mỗi bài ≥ 20 mục BibTeX).
+  - Nhãn tự động được sinh cho ≥ 10% số bài báo còn lại dựa trên đối sánh chính xác tiêu đề và tác giả.
+- **Quy trình M3:**
+  1. Sinh danh sách ứng viên (candidate pairs) giữa BibTeX entries và Semantic Scholar references (`src/matching/m3_candidates.py`).
+  2. Tính toán đặc trưng chuỗi (`src/matching/m3_string_features.py`) và đặc trưng ngữ cảnh từ các câu chứa `\cite` trong `elements` (`src/matching/m3_context_features.py`).
+  3. Huấn luyện bộ phân lớp xếp hạng (`src/matching/m3_model.py`) và đánh giá chất lượng bằng chỉ số **MRR@5** (`src/matching/m3_evaluate.py`).
+  4. Đóng gói và upload toàn bộ 6 bảng Parquet cùng predictions lên Hugging Face Hub (`src/matching/m3_publish_hf.py`).
+
+---
+
+## 7. Kiểm thử & Đảm bảo chất lượng (QA)
+
+Dự án sở hữu bộ kiểm thử tự động toàn diện với **162 tests** được tổ chức khoa học trong `src/tests/`.
+
+```bash
+# Chạy toàn bộ test suite từ thư mục gốc:
+pytest src/tests -q
+
+# Chạy kiểm thử riêng cho M1:
+pytest src/tests/test_run_m1_downloader.py src/tests/test_m1_references.py src/tests/test_m1_metadata.py -v
+
+# Chạy kiểm thử riêng cho M2:
+pytest src/tests/test_m2_pipeline.py src/tests/test_m2_hierarchy.py src/tests/test_m2_cleanup.py src/tests/test_m2_export_parquet.py -v
 ```
 
-Các giá trị `reason` khác: `no_tex_in_archive`, `single_file_not_tex`, `corrupt_archive`, `unknown_format`.
+Mọi bài test đều tự động cô lập thư mục dữ liệu qua `tmp_path`, đảm bảo không làm bẩn hoặc thay đổi dữ liệu thật trong `data/`.
 
-**Một phần tử trong `refs.json`** (giữ mọi reference, kể cả không có arXiv ID)
+---
 
-```json
-{
-  "ref_arxiv_id": "1706.03762", "ref_title": "...", "ref_authors": ["X"],
-  "ref_submission_date": "2020-05-01", "ref_venue": null, "ref_s2_id": "p1",
-  "external_ids": {"ArXiv": "1706.03762"}
-}
-```
+## 8. Quy tắc làm việc trên Git
 
-`ref_submission_date` lấy từ trường `publicationDate` của Semantic Scholar (theo hướng dẫn của thầy: tên `submission_date` chỉ để thống nhất với bảng `papers`). Nếu reference không có `publicationDate`, code dùng năm xuất bản (`YYYY`) làm giá trị dự phòng, nên cột này có thể chứa cả `YYYY-MM-DD` lẫn `YYYY`.
+1. **Không commit trực tiếp lên nhánh `main`:**
+   - Mỗi tính năng/nhiệm vụ được thực hiện trên một nhánh riêng: `p1/m1-download`, `p2/m2-bibitem`, `p3/m2-cleanup`, `p4/m2-parquet`...
+2. **Quy ước đặt thông điệp commit:**
+   - Commit message bắt buộc có tiền tố phân đoạn:
+     - `m1: ...` cho các thay đổi liên quan đến crawler, Semantic Scholar, bảng M1.
+     - `m2: ...` cho parser, BibTeX, hierarchy, text cleaning, parquet M2.
+     - `m3: ...` cho candidate generation, feature, model, evaluation.
+     - `docs: ...` cho cập nhật tài liệu kỹ thuật.
+     - `test: ...` hoặc `fix: ...` cho bổ sung kiểm thử và sửa lỗi.
+3. **Quy trình Pull Request và Buddy Review:**
+   - Mọi Pull Request trước khi merge vào `main` bắt buộc phải có ít nhất 1 buddy review:
+     - **P1** review chéo với **P3** (Source & Structure ↔ Text & Model).
+     - **P2** review chéo với **P4** (References & BibTeX ↔ Data & Delivery).
+   - Đảm bảo 100% tests chạy thành công (`pytest src/tests`) trước khi merge.
+4. **Tuyệt đối bảo mật:**
+   - Không commit dữ liệu (`data/`, `corpus/`, `*.parquet`, `*.csv`).
+   - Không commit thông tin nhạy cảm (`.env`, `S2_API_KEY`).
 
-### Hai bảng đầu ra
+---
 
-| Bảng | Cột |
-|---|---|
-| `papers.parquet` | `arxiv_id`, `title`, `authors` (list), `submission_date`, `revised_dates` (list), `venue` |
-| `references.parquet` | `arxiv_id` (bài trích dẫn), `ref_arxiv_id`, `ref_title`, `ref_authors` (list), `ref_submission_date`, `ref_s2_id` |
+## 9. Xử lý sự cố thường gặp (Troubleshooting)
 
-Bảng `references` chỉ chứa reference **có arXiv ID** (theo đề). `references.csv` có thêm `ref_venue` và `external_ids`. Có thể dựng lại hai bảng bất cứ lúc nào: `python src/crawler/m1_tables.py --data-dir ./data`.
-
-### Log từng phiên `benchmark/session_NNN.json`
-
-Cùng các khóa chỉ số như `benchmark_m1_total.json` (bảng dưới) cộng thêm thông tin phiên:
-
-| Khóa | Ý nghĩa |
-|---|---|
-| `session_index`, `status` | Số thứ tự phiên; `completed`, `interrupted` hoặc `running` (bị kill đột ngột). |
-| `started_at_utc`, `updated_at_utc`, `ended_at_utc` | Mốc thời gian của phiên. |
-| `environment` | Hệ điều hành, Python, số CPU, RAM, cờ `is_colab` (chứng minh đo trên Colab). |
-| `resumed`, `new_versions_this_session` | Phiên này có dùng dữ liệu từ phiên trước không; số version tải mới. |
-| `coverage` | Số version dự kiến/đã crawl/lỗi, số bài không tồn tại, số mục lấy từ cache. |
-| `paper_times_s`, `paper_sizes_bytes`, `paper_results`, `paper_references` | Số liệu từng bài. |
-
-### `benchmark_m1_total.json`
-
-| Nhóm | Khóa chính |
-|---|---|
-| Phiên | `n_sessions`, `n_completed_sessions`, `n_interrupted_sessions`, `sessions` (bảng từng phiên) |
-| Thời gian | `total_wall_s`, `total_wall_h`, `stages_s` (discovery/crawl/backup/tables), `discovery_s`, `avg_paper_s`, `max_paper_s` |
-| Thành công | `success_rate`, `ref_success_rate`, `avg_refs_per_paper`, `avg_arxiv_refs_per_paper` |
-| Kích thước | `avg_paper_size_before_bytes`, `avg_paper_size_after_bytes`, `n_pdf_only_versions` |
-| Tài nguyên | `peak_ram_mb`, `avg_ram_mb`, `peak_disk_mb`, `final_output_mb`, `environments` |
-| Bao phủ | `coverage.version_coverage`, `coverage.failed_versions`, `coverage.not_found_papers` |
-
-## 6. Ước lượng thời gian
-
-> Đây là **ước lượng tính toán, chưa đo thực tế**. Hãy chạy 3 bài thật ở bước 1 rồi so lại.
-
-Nút thắt là giới hạn của arXiv: **mỗi version là một request riêng, cách nhau tối thiểu 3 giây**, chỉ một kết nối. CPU, RAM và băng thông gần như không ảnh hưởng. Công thức: `tổng ≈ (số version) × max(3 giây, thời gian tải) + discovery`.
-
-Thầy cho biết trung vị của các nhóm năm ngoái vào khoảng **7–8 giờ cho 5 000 ID**. Con số này khớp với tính toán của nhóm: với giả định ~1,6 version mỗi bài thì 5 000 ID cần ~8 000 lần tải ≈ 6,7–9 giờ. Với 20 000 ID, ước lượng khoảng **28–45 giờ** (tức 3–4 phiên Colab), trong đó discovery chiếm khoảng một giờ. Số version trung bình thực tế sẽ biết sau khi discovery xong (xem `discovery_cache.json`).
-
-Dung lượng đầu ra ước tính từ vài GB đến hơn chục GB (chưa đo), đủ trong giới hạn đĩa Colab. RAM đỉnh bị chi phối bởi archive lớn nhất (mỗi archive được giữ trong bộ nhớ).
-
-## 7. Tăng tốc
-
-Theo thầy, **chính thức không có cách nào tăng tốc việc crawl**; hướng tối ưu duy nhất là xử lý dữ liệu đã lấy trong khi chờ dữ liệu mới. Code đã làm như sau:
-
-- Gọi Semantic Scholar (theo batch) **song song** với việc tải source từ arXiv. Hai bước dùng hai máy chủ khác nhau nên không tranh giới hạn của nhau.
-- Khoảng cách 3 giây được tính từ lúc **bắt đầu** request này đến lúc bắt đầu request kế tiếp, nên thời gian giải nén và ghi file của version trước nằm trong khoảng chờ, không cộng thêm.
-- Cache discovery và checkpoint theo version/bài, nên chạy lại không lặp công việc.
-
-Các hướng còn lại có lợi ích nhỏ: giải nén/ghi file bất đồng bộ (chỉ có ích khi lần tải kèm giải nén dài hơn 3 giây), hoặc gom thêm ID mỗi request discovery (tiết kiệm khoảng 15–20 phút). Mọi cách làm giảm khoảng cách 3 giây, tải song song nhiều version hay đổi IP/chia ID cho nhiều máy chạy cùng lúc đều vi phạm quy định và dễ bị arXiv chặn 403, nên **không dùng**.
-
-## 8. Xử lý lỗi thường gặp
-
-| Hiện tượng | Nguyên nhân / cách xử lý |
-|---|---|
-| `ModuleNotFoundError: utils` hoặc `crawler` | Chạy từ thư mục gốc repo bằng `python src/run_m1.py`. |
-| `ModuleNotFoundError: pyarrow` | `pip install -r src/requirements.txt`. |
-| HTTP 403 từ arXiv | Đang dùng sai host hoặc request quá dày; kiểm tra lại `BASE_URL` và `MIN_DELAY_SECONDS`. |
-| HTTP 429 từ Semantic Scholar | Đặt `S2_API_KEY`; code tự giãn nhịp và thử lại. Bài lỗi sẽ được gọi lại ở lần chạy sau. |
-| Cảnh báo `CONTACT_EMAIL` mặc định | `export CONTACT_EMAIL=...` trước khi chạy. |
-| `version_coverage` < 1 | Xem các dòng lỗi tải source trong log, chạy lại cùng lệnh để thử lại version lỗi. |
-| `not_found_papers` > 0 | ID không tồn tại trên arXiv API (bị xóa/chưa có); không phải lỗi mạng. |
-| Phiên mới không thấy dữ liệu cũ | Chưa khôi phục từ `--backup-dir` (xem mục "Chạy nhiều phiên Google Colab"). |
+| Hiện tượng / Thông báo lỗi | Nguyên nhân gốc rễ | Cách xử lý dứt điểm |
+| --- | --- | --- |
+| `ModuleNotFoundError: No module named 'utils'` hoặc `'crawler'` | Chạy python từ thư mục con hoặc chưa nhận diện `src/`. | Luôn chạy lệnh từ **thư mục gốc repo** bằng `python src/run_m1.py` hoặc `python src/run_m2.py`. Đã có `pytest.ini` cấu hình sẵn `pythonpath = src`. |
+| `HTTP 403 Forbidden` từ arXiv | Vi phạm chính sách crawler (quá nhiều kết nối song song, giãn cách < 3s, hoặc sai host). | Giữ nguyên mặc định kết nối tuần tự và `MIN_DELAY_SECONDS = 3.0`. Đảm bảo `BASE_URL` sử dụng `export.arxiv.org`. |
+| `HTTP 429 Too Many Requests` từ Semantic Scholar | Gửi request quá nhanh khi không có API key. | Đăng ký API key miễn phí tại Semantic Scholar và cấu hình biến `S2_API_KEY`. Mã nguồn đã tích hợp sẵn cơ chế lũy thừa giãn nhịp (exponential backoff) và tự thử lại. |
+| `Thiếu ID cuối của tháng 2512` | Khoảng ID đi qua 2 tháng nhưng chưa khai báo ID cuối tháng trước. | Bổ sung tham số `--month-last 2512=25075` vào lệnh chạy `run_m1.py`. |
+| Cảnh báo `User-Agent mặc định` | Chưa cấu hình email liên hệ cho crawler. | Khai báo `export CONTACT_EMAIL="email_cua_ban@domain.com"` trong môi trường hoặc `.env`. |
+| Bản ghi rỗng không có file `.tex` trong `vN/` | Bài báo chỉ xuất bản định dạng PDF trên arXiv. | Đây là đặc điểm bình thường của dữ liệu. M1 tạo thư mục `vN/` rỗng kèm `metadata.json`, M2 tự động ghi nhận là bản ghi rỗng theo đúng yêu cầu của đề. |
+| Mất checkpoint khi mở phiên Colab mới | Chưa sao lưu dữ liệu phiên trước vào Google Drive. | Luôn truyền cờ `--backup-dir /content/drive/MyDrive/...` và thực hiện khôi phục dữ liệu ở đầu mỗi notebook Colab. |
+| Cảnh báo tính toàn vẹn Parquet (`validate_m2_integrity`) | Có `element_id` trong hierarchy không tồn tại trong `elements.json`. | Chạy lại `python src/run_m2.py --steps tree,content --export` để đảm bảo cây phân cấp và danh sách phần tử văn bản được đồng bộ cùng nhịp. |

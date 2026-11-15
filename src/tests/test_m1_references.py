@@ -1,15 +1,20 @@
+"""Test offline cho M1 references (không gọi mạng): pytest src/tests/test_m1_references.py
+
+Luồng hiện tại: crawler/m1_references.fetch_batch_group() gọi Semantic Scholar theo batch,
+run_m1.crawl_batch() điều phối (source arXiv tuần tự + reference song song) và ghi checkpoint.
+"""
 import json
 import sys
-import pytest
-from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from crawler import m1_references as R  # noqa: E402
 from utils import config as C  # noqa: E402
 from utils.schemas import validate_reference_rows  # noqa: E402
-from run_m1 import crawl_references  # noqa: E402
-
+import run_m1  # noqa: E402
 
 class FakeResponse:
     def __init__(self, status_code, payload):
@@ -20,7 +25,6 @@ class FakeResponse:
     def json(self):
         return self.payload
 
-
 class FakeSession:
     def __init__(self, responses):
         self.responses = iter(responses)
@@ -30,15 +34,14 @@ class FakeSession:
         self.calls.append((url, kwargs))
         return next(self.responses)
 
-
 class FakePerf:
     def __init__(self):
         self.paper_times = {}
         self.ref_stats = {}
+        self.results = {}
 
-    @contextmanager
-    def paper(self, arxiv_id):
-        yield
+    def paper(self, _arxiv_id):
+        return nullcontext()
 
     def add_paper_time(self, arxiv_id, seconds):
         self.paper_times[arxiv_id] = self.paper_times.get(arxiv_id, 0) + seconds
@@ -46,82 +49,124 @@ class FakePerf:
     def record_references(self, arxiv_id, ok, total_refs=0, arxiv_refs=0):
         self.ref_stats[arxiv_id] = (ok, total_refs, arxiv_refs)
 
+    def record_paper_size(self, *_a, **_k):
+        pass
 
-def test_batch_crawl_writes_and_skips_cached_results(tmp_path, monkeypatch):
+    def record_result(self, arxiv_id, ok):
+        self.results[arxiv_id] = ok
+
+def _info(ids, n_versions=1):
+    return {aid: {"title": "T", "authors": [], "venue": None, "n_versions": n_versions,
+                  "version_dates": {1: "2020-01-01"}} for aid in ids}
+
+def _coverage():
+    return {"expected_versions": 0, "crawled_versions": 0, "failed_versions": 0,
+            "not_found_papers": 0, "cached_versions": 0, "cached_refs_papers": 0}
+
+def _fake_source(monkeypatch):
+    monkeypatch.setattr(run_m1.m1_download, "fetch_source", lambda *_a: b"source")
+    monkeypatch.setattr(
+        run_m1.m1_download, "save_source_with_stats",
+        lambda _data, out: (out.mkdir(parents=True, exist_ok=True),
+                            (out / "main.tex").write_bytes(b"s"),
+                            ("ok", "", ["main.tex"], 1, 1, 1))[-1],
+    )
+
+@pytest.fixture(autouse=True)
+def no_wait(monkeypatch):
+    monkeypatch.setattr(R, "polite_wait", lambda: None)
+    monkeypatch.setattr(R, "_circuit_breaker", lambda: None)
+
+def test_fetch_batch_group_uses_one_request_for_whole_group(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "DATA_DIR", tmp_path)
     papers = [{"references": [{"title": "Reference A"}]}, {"references": []}]
     session = FakeSession([FakeResponse(200, papers)])
 
-    assert R.crawl(
-        ["2606.20734", "2606.20735"], attempts=1, session=session, batch_size=25
-    ) == (2, 0)
+    assert R.fetch_batch_group(session, ["2606.20734", "2606.20735"], attempts=1) == papers
     assert len(session.calls) == 1
     url, request = session.calls[0]
     assert url == R.BATCH_URL
     assert request["json"]["ids"] == ["ARXIV:2606.20734", "ARXIV:2606.20735"]
     assert request["params"]["fields"] == C.S2_REF_FIELDS
-    assert json.loads(C.refs_path("2606.20734").read_text()) == {
-        "arxiv_id": "2606.20734", "references": papers[0]["references"]
-    }
-    raw_record = json.loads(C.raw_refs_path("2606.20734").read_text())
-    assert raw_record["arxiv_id"] == "2606.20734"
-    assert raw_record["response"] == papers[0]
-    assert raw_record["endpoint"].endswith("2606.20734")
-    assert raw_record["retrieved_at"]
-    crawl_stats = json.loads(
-        (tmp_path / "references_crawl_stats.json").read_text(encoding="utf-8")
-    )
-    assert crawl_stats["requested"] == 2
-    assert crawl_stats["attempted"] == 2
-    assert crawl_stats["successful"] == 2
-    assert crawl_stats["failed"] == 0
 
-    assert R.crawl(
-        ["2606.20734", "2606.20735"], attempts=1, session=session, batch_size=25
-    ) == (0, 0)
-    assert len(session.calls) == 1
-    crawl_stats = json.loads(
-        (tmp_path / "references_crawl_stats.json").read_text(encoding="utf-8")
-    )
-    assert crawl_stats["skipped"] == 2
-    assert crawl_stats["attempted"] == 0
-
-
-def test_batch_crawl_splits_rejected_group(tmp_path, monkeypatch):
-    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(R, "polite_wait", lambda: None)
-    monkeypatch.setattr(R, "_touch", lambda: None)
+def test_fetch_batch_group_splits_rejected_group():
     session = FakeSession([
         FakeResponse(413, {}),
         FakeResponse(200, [{"references": []}]),
         FakeResponse(200, [{"references": []}]),
     ])
 
-    assert R.crawl(
-        ["2606.20734", "2606.20735"], attempts=1, session=session, batch_size=2
-    ) == (2, 0)
+    assert R.fetch_batch_group(session, ["2606.20734", "2606.20735"], attempts=1) == [
+        {"references": []}, {"references": []},
+    ]
     assert len(session.calls) == 3
-    assert all(C.refs_path(arxiv_id).exists() for arxiv_id in ["2606.20734", "2606.20735"])
 
+def test_fetch_batch_group_returns_none_for_single_rejected_id():
+    session = FakeSession([FakeResponse(400, {})])
 
-def test_invalid_reference_shape_is_rejected_without_writing(tmp_path, monkeypatch):
+    assert R.fetch_batch_group(session, ["2606.20734"], attempts=1) == [None]
+
+def test_fetch_batch_group_raises_on_server_error():
+    session = FakeSession([FakeResponse(500, {})])
+
+    with pytest.raises(R.ReferenceCrawlError, match="HTTP 500"):
+        R.fetch_batch_group(session, ["2606.20734"], attempts=1)
+
+def test_crawl_batch_writes_refs_and_reuses_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "DATA_DIR", tmp_path)
-    session = FakeSession([FakeResponse(200, [{"references": None}])])
+    _fake_source(monkeypatch)
+    ids = ["2606.20734", "2606.20735"]
+    papers = [{"references": [{"externalIds": {"ArXiv": "1234.5678"}}]}, {"references": []}]
+    calls = []
 
-    assert R.crawl(["2606.20734"], attempts=1, session=session, batch_size=25) == (0, 1)
+    def fetch_batch(_session, batch_ids):
+        calls.append(list(batch_ids))
+        return papers[:len(batch_ids)]
+
+    monkeypatch.setattr(R, "fetch_batch_group", fetch_batch)
+    perf, coverage = FakePerf(), _coverage()
+
+    run_m1.crawl_batch(ids, _info(ids), perf, tmp_path, object(), coverage)
+
+    assert calls == [ids]
+    assert json.loads(C.refs_path(ids[0]).read_text())["references"][0]["ref_arxiv_id"] == "1234.5678"
+    assert json.loads(C.raw_refs_path(ids[0]).read_text())["response"] == papers[0]
+    assert perf.ref_stats == {ids[0]: (True, 1, 1), ids[1]: (True, 0, 0)}
+    assert coverage["cached_refs_papers"] == 0
+
+    # Lượt hai: đã có refs.json + raw_refs.json -> không gọi lại Semantic Scholar
+    calls.clear()
+    run_m1.crawl_batch(ids, _info(ids), perf, tmp_path, object(), coverage)
+
+    assert calls == []
+    assert coverage["cached_refs_papers"] == 2
+
+def test_crawl_batch_records_structured_failure_when_batch_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
+    _fake_source(monkeypatch)
+
+    def fetch_batch(_session, _batch_ids):
+        raise R.ReferenceCrawlError("HTTP 500")
+
+    monkeypatch.setattr(R, "fetch_batch_group", fetch_batch)
+    perf = FakePerf()
+
+    run_m1.crawl_batch(["2606.20734"], _info(["2606.20734"]), perf, tmp_path, object(), _coverage())
+
+    record = json.loads(C.refs_failures_path().read_text(encoding="utf-8").splitlines()[0])
+    assert record["arxiv_id"] == "2606.20734"
+    assert record["category"] == "request_failure"
+    assert "x-api-key" not in record["error"].lower()
     assert not C.refs_path("2606.20734").exists()
-    assert not C.raw_refs_path("2606.20734").exists()
+    assert perf.ref_stats == {"2606.20734": (False, 0, 0)}
 
-
-def test_raw_checkpoint_is_required_for_resume(tmp_path, monkeypatch):
+def test_crawl_batch_skips_papers_not_in_arxiv_api(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "DATA_DIR", tmp_path)
-    C.ensure_dir(C.paper_dir("2606.20734"))
-    C.refs_path("2606.20734").write_text("{}", encoding="utf-8")
-    session = FakeSession([FakeResponse(200, [{"references": []}])])
+    perf = FakePerf()
 
-    assert R.crawl(["2606.20734"], attempts=1, session=session, batch_size=25) == (1, 0)
-    assert C.raw_refs_path("2606.20734").exists()
+    run_m1.crawl_batch(["2606.20734"], {}, perf, tmp_path, object(), _coverage())
 
+    assert perf.results == {"2606.20734": False}
 
 def test_published_references_export_filters_arxiv_targets(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "DATA_DIR", tmp_path)
@@ -134,7 +179,7 @@ def test_published_references_export_filters_arxiv_targets(tmp_path, monkeypatch
         ],
     }), encoding="utf-8")
 
-    stats = R.build_published_references()
+    rows, stats = R.collect_published_rows()
 
     assert stats == {
         "total_local_references": 2,
@@ -143,27 +188,27 @@ def test_published_references_export_filters_arxiv_targets(tmp_path, monkeypatch
         "published_rows": 1,
         "duplicate_rows": 0,
     }
+    assert [row["ref_arxiv_id"] for row in rows] == ["1234.56789"]
+
+    R.write_published_csv(rows, stats)
     lines = C.references_csv_path().read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert "1234.56789" in lines[1]
 
-
 def test_published_export_deduplicates_reference_identity_and_reports_count(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "DATA_DIR", tmp_path)
     C.ensure_dir(C.paper_dir("2606.20734"))
-    duplicate = {"paperId": "s2-a", "title": "Linked",
-                 "externalIds": {"ArXiv": "1234.56789"}}
+    duplicate = {"paperId": "s2-a", "title": "Linked", "externalIds": {"ArXiv": "1234.56789"}}
     C.refs_path("2606.20734").write_text(json.dumps({
         "arxiv_id": "2606.20734",
         "references": [duplicate, duplicate],
     }), encoding="utf-8")
 
-    stats = R.build_published_references()
+    _, stats = R.collect_published_rows()
 
     assert stats["total_local_references"] == 2
     assert stats["duplicate_rows"] == 1
     assert stats["published_rows"] == 1
-
 
 def test_reference_ids_are_normalized_without_changing_raw_payload():
     row = R.normalize_reference("https://arxiv.org/abs/2606.20734v2", {
@@ -173,20 +218,6 @@ def test_reference_ids_are_normalized_without_changing_raw_payload():
 
     assert row["arxiv_id"] == "2606.20734"
     assert row["ref_arxiv_id"] == "hep-th/9901001"
-
-
-def test_failed_batch_requests_write_structured_failure_records(tmp_path, monkeypatch):
-    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
-    session = FakeSession([FakeResponse(500, {})])
-
-    assert R.crawl(["2606.20734"], attempts=1, session=session, batch_size=25) == (0, 1)
-
-    record = json.loads(C.refs_failures_path().read_text(encoding="utf-8").splitlines()[0])
-    assert record["arxiv_id"] == "2606.20734"
-    assert record["attempts"] == 1
-    assert record["category"] == "request_failure"
-    assert "x-api-key" not in record["error"].lower()
-
 
 def test_published_reference_schema_rejects_empty_identifiers():
     with pytest.raises(ValueError, match="empty identifier"):
@@ -200,30 +231,3 @@ def test_published_reference_schema_rejects_empty_identifiers():
             "ref_s2_id": None,
             "external_ids": {},
         }])
-
-
-def test_run_m1_fetches_references_in_batches(tmp_path, monkeypatch):
-    import run_m1
-
-    monkeypatch.setattr(C, "DATA_DIR", tmp_path)
-    ids = ["2606.20734", "2606.20735"]
-    for arxiv_id in ids:
-        C.ensure_dir(C.paper_dir(arxiv_id))
-        C.meta_path(arxiv_id).write_text("{}", encoding="utf-8")
-
-    calls = []
-
-    def fetch_batch(_session, batch_ids):
-        calls.append(batch_ids)
-        return [{"references": [{"externalIds": {"ArXiv": "1234.5678"}}]} for _ in batch_ids]
-
-    monkeypatch.setattr(R, "fetch_batch_group", fetch_batch)
-    monkeypatch.setattr(run_m1, "build_references_table", lambda: 0)
-    perf = FakePerf()
-
-    crawl_references(ids, perf, batch_size=25)
-
-    assert calls == [ids]
-    assert perf.ref_stats == {arxiv_id: (True, 1, 1) for arxiv_id in ids}
-    assert all(perf.paper_times[arxiv_id] >= 0 for arxiv_id in ids)
-    assert C.refs_path(ids[0]).exists()

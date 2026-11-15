@@ -1,19 +1,45 @@
 # M2 — Hierarchical Parsing and Standardization
 
+> **Re-verified against commit `01b5bb0`.** M2 was largely rewritten: `run_m2.py`
+> now orchestrates all three steps itself, `m2_export_parquet.py` was deleted,
+> `m2_cleanup.py` grew a macro-expansion layer and an unknown-command counter,
+> `m2_bibitem.py` learned inline `\bibitem`, and two inspection helpers appeared.
+> **`m2_hierarchy.py` is currently unimportable** — see §7.1 before you run anything.
+
 ## 1. Overview
 
 Milestone 2 turns the raw LaTeX collected in M1 into structured, deduplicated data. It produces three of the six final tables — `elements`, `hierarchy`, `bibtex` — and also generates the candidate pairs M3 needs.
 
-There are two things you can run today:
+`run_m2.py` drives everything through three ordered steps:
+
+| Step | Flag value | Modules used | Output |
+|--------|-------------|--------------|--------|
+| `bib` | `--steps bib` | `m2_bibitem`, `m2_bib_dedup`, `m3_candidates` | `bibtex_merged.json`, `cite_map.json`, `candidates.json` |
+| `tree` | `--steps tree` | `m2_gather`, `m2_hierarchy` | `v{N}/tree_raw.json` |
+| `content` | `--steps content` | `m2_cleanup`, `m2_sentences`, `m2_content_dedup` | `elements.json`, `hierarchy.json`, `parse_status.json` |
+
+Plus `--export`, which writes `elements`/`hierarchy`/`bibtex` Parquet via
+`utils.schemas.export_m2_parquet`.
+
+```bash
+python src/run_m2.py --corpus-dir data                 # bib, tree, content
+python src/run_m2.py --corpus-dir data --export        # + Parquet into data/export/
+python src/run_m2.py --corpus-dir data --export-only   # Parquet only, no re-parse
+python src/run_m2.py --corpus-dir data --steps bib     # one step
+```
+
+> `run_m2.py` **does** now call the hierarchy parser. That closes the defect the
+> previous revision of this doc documented. It only works once §7.1 is fixed.
+
+Standalone helpers that are not part of the pipeline:
 
 | Script | What it does |
 |--------|-------------|
-| `src/parser/m2_hierarchy.py` | Parse one paper's `.tex` into `tree_raw.json` |
-| `src/parser/m2_content_dedup.py` | Clean + dedup across versions → `elements.json`, `hierarchy.json` |
-| `src/run_m2.py` | **BibTeX dedup + citation rewriting + candidate generation** |
-| `src/parser/m2_export_parquet.py` | Export `elements`, `hierarchy`, `bibtex` to Parquet |
-
-Note that `run_m2.py` does **not** call the hierarchy parser. You run the LaTeX tree steps separately.
+| `src/parser/m2_gather.py` | Inspect root-file detection for a range of papers |
+| `src/parser/m2_hierarchy.py` | Build `tree_raw.json` and print an outline |
+| `src/parser/m2_content_dedup.py` | Build `elements.json` / `hierarchy.json` for existing trees |
+| `src/parser/m2_inspect.py` | **New.** Human-readable dump of one paper's M2 output |
+| `src/parser/m2_pick_papers.py` | **New.** List papers suitable for M3 manual labeling, from `m2_stats.json` |
 
 ---
 
@@ -26,12 +52,13 @@ Note that `run_m2.py` does **not** call the hierarchy parser. You run the LaTeX 
 | Itemize points branch into deeper levels | `m2_hierarchy.py` + `m2_content_dedup.py` |
 | Exclude References, keep Acknowledgements / Appendix | `m2_hierarchy.py` |
 | LaTeX cleanup (`\centering`, `[htbp]`, `\midrule`) | `m2_cleanup.py` |
+| Macro expansion (`\newcommand`, `\def`, custom environments) | `m2_cleanup.collect_macros` + `expand_user_macros` (**not wired — see §7.1**) |
 | Math normalization (inline → `$…$`, block → `equation`) | `m2_cleanup.py` |
 | Sentence splitting without breaking on `i.e.` / `Fig. 1` / decimals | `m2_sentences.py` |
-| `\bibitem` / `.bib` → BibTeX entries | `m2_bibitem.py` |
+| `\bibitem` / `.bib` → BibTeX entries | `m2_bibitem.parse_bibitems` + `parse_bibtex_entries` |
 | Dedup reference entries, union fields, rename `\cite` | `m2_bib_dedup.py` |
 | Full-text dedup across versions | `m2_content_dedup.py` |
-| Parquet export with schema enforcement | `m2_export_parquet.py` + `utils/schemas.py` |
+| Parquet export with schema enforcement | `run_m2 --export` → `utils/schemas.export_m2_parquet` |
 
 ---
 
@@ -46,31 +73,37 @@ data/<key>/v{N}/*.tex
     ├─► m2_gather.collect_compilation_files(vdir, root)
     │       → ordered list of .tex files actually compiled
     │
-    ├─► m2_hierarchy.build_tree(files)
+    ├─► m2_hierarchy.expand_includes(vdir, root)   → full_text
+    │       ⚠ ME.preprocess_version_text(full_text)  ← MISSING MODULE, §7.1
+    │
+    ├─► m2_hierarchy.parse_version(vdir, arxiv_id)
     │       → data/<key>/v{N}/tree_raw.json
     │
     └─► m2_content_dedup.process_paper(arxiv_id)
-            ├─ flatten_tree(tree_raw)      # tree → flat node list
-            ├─ clean_text / split_sentences
-            ├─ dedup by (kind, content)
+            ├─ flatten_tree(tree_raw, cite_map)   # tree → flat node list
+            ├─ clean_text / clean_figure / split_sentences
+            ├─ dedup by (kind, content, occurrence)
             └─► data/<key>/elements.json
                 data/<key>/hierarchy.json
                 data/<key>/parse_status.json
 
-data/<key>/v{N}/*.bib
+data/<key>/v{N}/*.bib  +  \bibitem inside .tex
     │
     ├─► m2_bibitem.parse_bibtex_entries(text, arxiv_id, version)
+    ├─► m2_bibitem.parse_bibitems(text, arxiv_id, version)
     │       → list of entry dicts
     │
     ├─► m2_bib_dedup.deduplicate_keys(entries)
     │       → (canonical_entries, replacements, conflicts)
     │
+    ├─► m2_bib_dedup.to_bibtex_row(entry)   → BIBTEX_SCHEMA-shaped dict
+    │
     └─► m2_bib_dedup.rewrite_citations_with_count(tex_text, replacements)
-            → rewrites \cite{} in the .tex files in place
+            → counts \\cite rewrites (does NOT write .tex — see §7.3)
 
 data/<key>/bibtex_merged.json + data/<key>/refs.json
     │
-    └─► m3_candidates.generate_candidates(merged, references)
+    └─► m3_candidates.generate_candidates(merged, references_with_arxiv_id)
             → data/<key>/candidates.json   (M3 input)
 ```
 
@@ -144,9 +177,30 @@ python src/parser/m2_hierarchy.py --range 2512.23231-2601.03155 --limit 30
 | Step | Function | What it does |
 |------|----------|-------------|
 | 1 | `expand_includes` | Inlines `\input`/`\include` in place → one LaTeX string in reading order |
+| 1b | `ME.preprocess_version_text` | **BROKEN — module does not exist, see §7.1** |
 | 2 | `extract_body` | Keeps text between `\begin{document}` and `\end{document}` |
 | 3 | `scan_blocks` | Splits into flat blocks: `heading`, `paragraph`, `equation`, `figure`, `itemize`, `container` |
 | 4 | `build_tree` | Nests headings; level is inferred from which commands the paper actually uses |
+
+The public entry point is `parse_version(vdir, arxiv_id=None) -> dict`, which
+returns the tree dict and writes nothing. `process_paper(arxiv_id,
+skip_existing=False) -> list[tuple[str, str]]` loops every version directory and
+writes `v{N}/tree_raw.json`.
+
+`process_paper` returns `[(vdir.name, tree["status"]), ...]` where status is:
+
+| status | Meaning |
+|---|---|
+| `ok` | root found and parsed |
+| `empty` | no `.tex` files (PDF-only version from M1) |
+| `no_root` | `.tex` files exist but no `\documentclass` candidate |
+| `error` | exception during parse; `tree["error"]` holds the message |
+
+`run_m2` treats `no_root` and `error` as a paper-level failure:
+
+```python
+ok = not any(s in {"no_root", "error"} for _, s in statuses)
+```
 
 **Constants that control behaviour:**
 
@@ -161,12 +215,23 @@ LIST_ENVS    = {"itemize", "enumerate", "description"}
 SKIP_ENVS    = {"thebibliography"}
 ```
 
-`REFERENCES_TITLE_RE` matches `References`, `Bibliography`, `Literature Cited`, `Works Cited`, etc. A section whose cleaned title matches is dropped from the tree, but `\section*{Acknowledgements}` and appendices are kept.
+`is_references_title(title)` matches `References`, `Bibliography`, `Literature
+Cited`, `Works Cited`, etc. A section whose cleaned title matches is dropped from
+the tree, but `\section*{Acknowledgements}` and appendices are kept.
+
+`m1_source_reason(vdir)` maps M1's `metadata.json` status onto a
+human-readable skip reason, so a PDF-only version reports why the tree is empty
+instead of silently producing nothing.
 
 **Output `tree_raw.json` shape:**
 
 ```json
 {
+  "arxiv_id": "2512.23231",
+  "version": "v1",
+  "status": "ok",
+  "root_file": "main.tex",
+  "reason": null,
   "root": {
     "type": "document",
     "children": [
@@ -197,8 +262,20 @@ SKIP_ENVS    = {"thebibliography"}
 | `normalize_inline_math(text)` | `\(…\)`, `\begin{math}` → `$…$` |
 | `normalize_block_math(raw)` | `$$…$$`, `\[…\]`, `align`, `gather` → `\begin{equation}…\end{equation}` |
 | `split_segments(text)` | → `[("text"|"formula"|"figure", chunk)]` in order |
+| `protect_citations_and_refs(text)` | **New.** Masks `\cite*`/`\ref`/`\eqref`/`\label` |
+| `protect_urls(text)` | **New.** Masks `\url{}`/`\href{}`/bare URLs |
+| `protect_verbatim(text)` | **New.** Masks `\verb` |
+| `restore_protected(...)` | **New.** Puts the three stores back |
+| `normalize_units(text)` | **New.** `\SI`, `\qty`, `\num`, `\ang`, `\si` → plain text |
+| `strip_layout_commands(text)` | **New.** Removes `\footnotetext`, `\definecolor`, … plus arguments |
+| `normalize_accents(text)` | **New.** `\'e` → `é`, combining accents → Unicode |
+| `strip_group_braces(text)` | **New.** Drops redundant `{…}` grouping |
+| `collect_macros(text)` | **New.** Harvests `\newcommand`/`\def`/`\newenvironment`, returns `(macro_map, text_without_defs)` |
+| `expand_user_macros(text, max_rounds=4)` | **New.** Expands user macros with a recursion cap |
+| `process_unknown_commands(text)` | **New.** Fallback shell-stripper with a counter |
+| `get_unknown_commands_stats()` / `reset_unknown_commands()` / `save_unknown_commands_stats(path)` / `load_unknown_commands_stats(path)` | **New.** Counter plumbing |
 
-**Commands dropped** (`DROP_NOARG`):
+**Commands dropped** (`DROP_NO_ARGS`, ~50 entries):
 
 ```
 \centering, \raggedright, \raggedleft, \noindent, \indent, \clearpage,
@@ -206,11 +283,16 @@ SKIP_ENVS    = {"thebibliography"}
 \bfseries, \itshape, \medskip, \smallskip, \bigskip, ...
 ```
 
-**Commands unwrapped** (`UNWRAP` — command removed, content preserved):
+`DROP_WITH_ARGS` (~35 entries) removes the command **and** its braces.
+
+**Commands unwrapped** (`UNWRAP_COMMANDS` — command removed, content preserved):
 
 ```
 \textbf, \textit, \emph, \textsc, \textsl, \underline
 ```
+
+Plus `UNWRAP_SECOND_ARG` (4 commands, keeps the second argument),
+`SPACE_COMMANDS` (6 → single space), and `SYMBOL_MAP` (~20 → Unicode).
 
 **Math protection mechanism:** inline math is swapped for placeholder characters `\ue000`/`\ue001` before text cleaning, then restored. This guarantees no cleanup rule can corrupt a formula.
 
@@ -221,7 +303,24 @@ SKIP_ENVS    = {"thebibliography"}
 | `align`, `alignat`, `flalign`, `eqnarray` | `\begin{equation} \begin{aligned} …` |
 | `gather`, `multline` | `\begin{equation} \begin{gathered} …` |
 
+**Unknown-command fallback (`process_unknown_commands`).** Anything still
+standing after the tables is classified by argument shape and recorded in a
+module-level `Counter`:
+
+| Classifier | Test | Action | Counter key |
+|---|---|---|---|
+| dimension | `is_dimension_like(arg)` | drop arg | `name(dimension)` |
+| text-only | `is_text_only(arg)` | unwrap | `name(text)` |
+| complex | neither | drop everything | `name(complex)` |
+| no argument | `{` absent | drop command | `name(no_arg)` |
+
+`run_m2` dumps that counter to `benchmark/unknown_commands.json` at the end of
+every run, which is the "improvement loop" the changelog describes: run → read
+top unknown commands → add them to a table → rerun.
+
 > **Never simplified away:** `\cite{}` and `\ref{}` are always preserved. M3 depends on citation keys surviving cleanup.
+
+> **§7.10:** the counter is never reset between runs in the same process.
 
 ---
 
@@ -256,13 +355,15 @@ Split happens only when `.`/`!`/`?` is followed by whitespace and then an upperc
 
 ---
 
-### 4.5 `m2_bibitem.py` — BibTeX parsing
+### 4.5 `m2_bibitem.py` — BibTeX parsing (two sources)
 
-**Purpose:** Parse `.bib` file text into dictionaries, handling nested braces and quoted values.
+**Purpose:** Produce BibTeX entry dicts from **both** a `.bib` file and an inline
+`\begin{thebibliography}` list.
 
 ```python
-from parser.m2_bibitem import parse_bibtex_entries
+from parser.m2_bibitem import parse_bibtex_entries, parse_bibitems
 
+# from a .bib file
 entries = parse_bibtex_entries(
     open("data/2310-12345/v1/refs.bib").read(),
     arxiv_id="2310.12345",
@@ -272,7 +373,24 @@ entries = parse_bibtex_entries(
 #   "title": "Attention Is All You Need",
 #   "author": "Vaswani, Ashish and Shazeer, Noam",
 #   "year": "2017", "arxiv_id": "2310.12345", "version": 1}, ...]
+
+# from inline \bibitem
+items = parse_bibitems(full_tex_text, arxiv_id="2310.12345", version=1)
 ```
+
+`parse_bibitems` is the fix for the previous "papers using `thebibliography` are
+silently skipped" defect. It handles three common styles:
+
+| Style | Marker |
+|---|---|
+| `\newblock` (ACM / ACM-Reference-Format) | `\bibitem{key}` … `\newblock` segments |
+| ACL (`\bibitem[key]{key}` + `\begin{thebibliography}`) | optional argument form |
+| IEEE | bare `\bibitem{key}` followed by a single dense paragraph |
+
+Extracted per item: authors (`split_authors`), title (quoted-span heuristics),
+year, DOI (`_DOI_RE`), URL (`_URL_RE`), arXiv ID (`_ARXIV_RE`), venue
+(`_guess_type` decides `article` vs `inproceedings` vs `misc`), plus `raw_text`.
+LaTeX accents are decoded by `_ACCENT_RE` → `_strip_latex`.
 
 **How it works:**
 
@@ -385,73 +503,168 @@ python src/parser/m2_content_dedup.py          # every paper with versions.json
 
 ---
 
-### 4.8 `run_m2.py` — BibTeX + candidate pipeline
+### 4.8 `run_m2.py` — the integrated M2 runner
 
-**This is the script that produces M3's input.** It does not call the hierarchy/crawl steps.
+**This is now the one command that runs all of M2.** It was extended upstream; it
+now calls `m2_hierarchy` and `m2_content_dedup` itself instead of leaving them as
+separate scripts.
 
 ```bash
-python -m run_m2
+python -m run_m2                                   # all three steps, every paper
+python -m run_m2 --steps bib                       # BibTeX + candidates only
+python -m run_m2 --steps tree,content              # LaTeX parsing only
+python -m run_m2 --ids 2602.04870 --limit 5
+python -m run_m2 --export                          # ...then write the Parquet tables
+python -m run_m2 --export-only                     # skip parsing, only export
 ```
 
-**`process_paper(paper_dir)` step by step:**
+**Three ordered steps** (`ALL_STEPS = ("bib", "tree", "content")`):
 
-1. Glob `v*/*.bib`, parse each with `parse_bibtex_entries(text, paper_dir.name, version)`.
-2. `deduplicate_keys(entries)` → `merged`, `replacements`, `conflicts`.
-3. Write `bibtex_entries_raw.json` (raw, pre-dedup).
-4. Glob `v*/*.tex`, call `rewrite_citations_with_count` and **overwrite the `.tex` files in place**.
-5. Write `citation_key_replacements.json`.
-6. `_load_references(paper_dir)` — reads `refs.json`; falls back to the first `v*/references.json`.
-7. `generate_candidates(merged, references)`.
-8. `validate_candidate_rows(candidates)` — raises `ValueError` on schema violation.
-9. Sanity check: every replacement target must exist in `merged`, else `ValueError`.
-10. Write `candidate_entry_index.json`, `bibtex_merged.json`, `candidates.json`, `m2_stats.json`.
+| Step | Function called | Writes |
+|------|----------------|--------|
+| `bib` | `process_paper(paper_dir)` | `bibtex_entries_raw.json`, `cite_map.json`, `bibtex_conflicts.json`, `bibtex_merged.json`, `candidates.json`, `candidate_entry_index.json`, `m2_stats.json` |
+| `tree` | `H.process_paper(arxiv_id)` (`m2_hierarchy`) | `v{N}/tree_raw.json` |
+| `content` | `D.process_paper(arxiv_id)` (`m2_content_dedup`) | `elements.json`, `hierarchy.json`, `parse_status.json` |
 
-> **Warning about in-place mutation:** step 4 rewrites your `.tex` files. If you re-run M2 or re-parse the hierarchy, the citations are already renamed — the second run finds nothing to rewrite. This is idempotent in effect but means you cannot recover the original keys from the `.tex` files afterwards. Keep `data/` read-only backups if you need to re-parse from scratch.
+When `--export`/`--export-only` is set, `export_m2_parquet(corpus_dir=root,
+out_dir=root/"export")` runs inside a `PerfRecorder` stage and produces
+`elements.parquet`, `hierarchy.parquet`, `bibtex.parquet`.
 
-**`_corpus_dir()` fallback:** uses `data/corpus/` if it exists, otherwise `data/`. This matches the `run_m1.py --corpus-dir` default.
+> **§7.1 blocker:** the `tree` step imports `m2_hierarchy`, which imports the
+> missing `m2_macro_expansion` module. `--steps bib` and `--steps content` work;
+> `--steps tree` (and therefore the default no-flags run) raises
+> `ModuleNotFoundError` before the first paper is parsed.
 
-**`run_m2.run()`** iterates every directory under the corpus root that has at least one `v*/*.bib`, calls `process_paper`, and writes an aggregate `data/m2_stats.json` array.
+**`process_paper(paper_dir)` — the `bib` step, line by line:**
+
+1. `paper_arxiv_id(paper_dir)` — reads `paper.json`; falls back to the folder
+   name. The folder name is **not** a valid arXiv ID for old-style IDs
+   (`hep-th-9901001` cannot be un-mangled), which is why `paper.json` is
+   preferred.
+2. `collect_entries(paper_dir, arxiv_id)` — for every `v{N}` that contains at
+   least one `.tex` file:
+   - `_compiled_text(vdir)` → `G.find_root_file` then `H.expand_includes`, i.e.
+     the include-resolved source. Falls back to concatenating every `.tex`.
+   - `_bib_files(vdir, text)` → only the `.bib` names referenced by
+     `\bibliography{}`/`\addbibresource{}`; if none match, all `.bib` files in
+     the version (the `bib_fallback_versions` counter records this).
+   - `parse_bibtex_entries(...)` per `.bib` file.
+   - `parse_bibitems(text, arxiv_id, version)` on the `.tex` text.
+3. `deduplicate_keys(entries)` → `merged`, `replacements`, `conflicts`.
+4. `to_bibtex_row(entry)` per merged entry → the exact Parquet row shape.
+5. **Guard:** every replacement target must exist in `merged`, else
+   `ValueError("citation replacement points to a missing canonical key")`.
+6. `rewrite_citations_with_count(text, replacements)[1]` summed over every
+   version → `citation_keys_rewritten`. This **counts only**; the `.tex` files
+   are *not* rewritten any more.
+7. `_load_references(paper_dir)` → `refs.json` (`{"references": [...]}`) or the
+   first `v*/references.json` (a bare list).
+8. `references = [r for r in references_all if r.get("ref_arxiv_id")]` — **only
+   references with an arXiv ID become candidates**, implementing the statement's
+   "m × n with n = references having an arXiv ID".
+9. `generate_candidates(rows, references, diagnostics=...)` then
+   `validate_candidate_rows(candidates)` (raises on schema violation).
+10. Writes the JSON files listed in the table above, atomically
+    (`_atomic_json` writes `.tmp` then `Path.replace`).
+
+**`run(...)` orchestration:**
+
+```python
+run(corpus_dir=None, steps=ALL_STEPS, ids=None, limit=None,
+    skip_existing=False, export=False, bench_dir=None) -> list[dict]
+```
+
+- `_corpus_dir()` → `data/corpus/` if it exists, else `data/`.
+- It **reassigns `C.DATA_DIR` and `C.LOGS_DIR`** to the resolved corpus root so
+  every parser module that resolves paths through `utils.config` follows along.
+- Wraps the loop in `PerfRecorder("m2", watch_dirs=[root])`.
+- Per paper: `rec.paper(arxiv_id)`, then each requested step inside its own
+  `rec.stage_time(...)`, then `rec.record_result(arxiv_id, ok)`.
+- **One paper's exception never stops the run** — it is caught, stored as
+  `entry["error"] = "TypeName: message"`, and `ok` becomes `False`. The
+  `tree` step additionally marks failure for `no_root`/`error` statuses.
+- `--skip-existing` skips a paper only when **both** `m2_stats.json` and
+  `elements.json` exist.
+- Progress logs every 100 papers; ends with `n_papers` / `steps` /
+  `parse_success_rate` / `m2_output_bytes`.
+
+**Two aggregate outputs at the corpus root:**
+
+| File | Contents |
+|------|----------|
+| `m2_stats.json` | Array of every per-paper `stats` dict plus `tree_statuses` / `parse` / `version_status` / `error` |
+| `benchmark/m2_benchmark.json` | `PerfRecorder` timings + `m2_output_bytes` (`m2_json_bytes`, `export_parquet_bytes`) |
+| `benchmark/unknown_commands.json` | Top unknown LaTeX commands from `m2_cleanup` (§4.3) |
 
 **`m2_stats.json` fields for your report:**
 
 | Field | Use in report |
 |-------|--------------|
 | `bibtex_entries_ingested` | Total entries before dedup |
+| `bibtex_from_bib_files` / `bibtex_from_bibitem` | Which bibliography source dominated |
+| `bib_fallback_versions` | Versions where no `\bibliography{}` matched |
+| `versions_with_bibliography` | Versions that yielded any entry at all |
 | `canonical_entries` | Entries after dedup |
 | `duplicate_bibtex_entries` | `ingested - canonical` |
 | `merged_keys` | Number of old keys remapped |
-| `citation_keys_rewritten` | Occurrences of `\cite{}` rewritten in `.tex` |
+| `citation_keys_rewritten` | `\cite{}` keys that *would* be renamed |
 | `bibtex_conflicts` | Fields where versions disagreed |
-| `references_ingested` | References available for matching |
+| `references_ingested` / `references_with_arxiv_id` | Candidate pool size before/after the arXiv-ID filter |
 | `candidate_pairs` | Total (entry, reference) pairs generated |
-| `zero_candidate_entries` | Entries with no candidate above threshold |
-| `zero_candidate_percentage` | Same, as % |
+| `zero_candidate_entries` / `zero_candidate_percentage` | Entries with no candidate |
 | `candidate_count_{min,max,average,median}` | Candidate distribution |
 | `exact_title_candidates` / `fuzzy_title_candidates` | Title match quality |
-| `candidate_generation_skipped_by_reason` | Why pairs were dropped: `missing_title`, `title_below_threshold` |
+| `candidate_generation_skipped_by_reason` | `missing_title`, `title_below_threshold` |
 | `deduplication_seconds`, `candidate_generation_seconds`, `total_seconds` | Performance numbers |
+
+> **Note:** `candidates_per_entry` is a full dict (`{citation_key: [candidate_id,
+> ...]}`), so `m2_stats.json` is large. `benchmark/m2_benchmark.json`
+> `m2_json_bytes` counts only the eleven `M2_OUTPUT_FILES` names, deliberately
+> excluding the M1 `.tex`/`.bib` sources stored beside them.
 
 ---
 
-### 4.9 `m2_export_parquet.py` — Parquet export
+### 4.9 Parquet export — `utils.schemas.export_m2_parquet`
+
+The standalone `src/parser/m2_export_parquet.py` **no longer exists**; the export
+is reached through `run_m2 --export`.
 
 ```bash
-python src/parser/m2_export_parquet.py --corpus-dir data --out-dir data/export
+python -m run_m2 --export-only            # corpus default
+python -m run_m2 --export --corpus-dir data/corpus
 ```
 
-Calls `utils.schemas.export_m2_parquet`, which:
+`export_m2_parquet(corpus_dir, out_dir)`:
 
-1. Globs `elements.json`, `hierarchy.json`, `bibtex_merged.json` from every paper folder under `--corpus-dir`.
-2. Concatenates them **horizontally** — i.e. all papers' elements into one DataFrame, etc.
-3. Runs `validate_m2_integrity(elements_df, hierarchy_df, bibtex_df)` and prints each problem as `[INTEGRITY WARNING]`. Missing `element_id`s referenced by `hierarchy`, duplicate `(arxiv_id, element_id)` keys, and NULL required columns all show up here.
-4. Drops `hierarchy` rows with NULL `parent_id` (root nodes), printing how many were dropped.
-5. Writes `elements.parquet`, `hierarchy.parquet`, `bibtex.parquet` with explicit PyArrow schemas.
+1. Globs `elements.json`, `hierarchy.json`, `bibtex_merged.json` from every
+   paper folder under `corpus_dir`.
+2. Concatenates each type into one DataFrame.
+3. Runs `validate_m2_integrity(elements_df, hierarchy_df, bibtex_df)` and prints
+   each problem as `[INTEGRITY WARNING]`.
+4. Drops `hierarchy` rows with NULL `parent_id` (root nodes), reporting how many.
+5. Writes `elements.parquet`, `hierarchy.parquet`, `bibtex.parquet` into
+   `<corpus>/export/` with explicit PyArrow schemas.
 
-**Integrity checks performed** (`validate_m2_integrity`):
+**Integrity checks performed:**
 
 - `elements`: no NULL `element_id`/`arxiv_id`; no duplicate `(arxiv_id, element_id)`.
 - `bibtex`: no NULL `citation_key`/`arxiv_id`; no duplicate `(arxiv_id, citation_key)`.
 - `hierarchy`: every `element_id` and `parent_id` must exist in `elements`.
+
+`validate_candidate_rows(rows)` is a separate, stricter check called from
+`run_m2.process_paper`; it **raises** rather than warning.
+
+---
+
+### 4.10 Standalone helpers
+
+These are inspect/debug tools, not part of the pipeline.
+
+| Script | Purpose |
+|--------|---------|
+| `src/parser/m2_inspect.py` | Dump one paper's tree / elements / bibliography counts for a quick look |
+| `src/parser/m2_pick_papers.py` | Pick a small set of papers (by size or failure status) into a scratch corpus for debugging |
+| `src/matching/m3_pick_papers.py` | Same idea for M3 |
 
 ---
 
@@ -460,64 +673,185 @@ Calls `utils.schemas.export_m2_parquet`, which:
 Paths come from `utils/config.py`:
 
 ```python
+paper_key(arxiv_id)                # data/<key>/        ← folder name
+paper_dir(arxiv_id)                # data/<key>/
+version_dir(arxiv_id, version)     # data/<key>/v{N}/
 tree_raw_path(arxiv_id, version)   # data/<key>/v{N}/tree_raw.json
 cite_map_path(arxiv_id)            # data/<key>/cite_map.json
 elements_path(arxiv_id)            # data/<key>/elements.json
 hierarchy_path(arxiv_id)           # data/<key>/hierarchy.json
 parse_status_path(arxiv_id)        # data/<key>/parse_status.json
+refs_path(arxiv_id)                # data/<key>/refs.json
 ```
+
+`run_m2.run()` **overwrites `C.DATA_DIR`** with the resolved corpus root, so
+every one of these resolves under the corpus you passed on the command line.
 
 ---
 
 ## 6. Practical Run Order
 
 ```bash
-# Step 1 — parse LaTeX trees (one paper at a time during development)
-python src/parser/m2_gather.py --ids 2310.12345 --outline
-python src/parser/m2_hierarchy.py --ids 2310.12345
+# Step 1 — BibTeX + citations + candidates (works today)
+python -m run_m2 --steps bib --ids 2602.04870
 
-# Step 2 — clean, split sentences, dedup across versions
-python src/parser/m2_content_dedup.py --ids 2310.12345
+# Step 2 — LaTeX trees (blocked until §7.1 is fixed)
+python -m run_m2 --steps tree --ids 2602.04870
 
-# Step 3 — BibTeX dedup + citation rewrite + candidate generation
-python -m run_m2
+# Step 3 — clean, split sentences, dedup across versions
+python -m run_m2 --steps content --ids 2602.04870
 
-# Step 4 — export Parquet tables
-python src/parser/m2_export_parquet.py --out-dir data/export
+# Step 4 — everything + Parquet, whole corpus
+python -m run_m2 --export
 ```
 
-Steps 1–2 have to run per paper; steps 3–4 sweep the whole corpus.
+`--steps bib` and `--steps content` are independent; `content` needs `tree` output
+to be useful, and `tree` currently cannot import.
 
 ---
 
 ## 7. Known Issues and Improvements
 
-| Issue | Where | Impact | Suggested fix |
-|-------|-------|--------|--------------|
-| `\bibitem` in `.tex` not parsed | `m2_bibitem.py` | BibTeX table may miss entries for papers that use inline `\bibitem` instead of `.bib` | Add a `\bibitem` extractor, or confirm the corpus only uses `.bib` |
-| `@string` macros not expanded | `m2_bibitem.py` | `journal = jmlr` stays literal | Add a pre-pass collecting `@string{...}` definitions |
-| LaTeX accents not decoded | `m2_bibitem.py` | `G{\"o}del` compares poorly against Semantic Scholar's `Gödel` | Decode in `normalize_text` (`m3_candidates.py`) — partially handled there |
-| Nested braces in `\cite` | `m2_bib_dedup.py` | `\cite{a{b}}` not rewritten | Rare; accept or extend regex |
-| `.tex` files mutated in place | `run_m2.py` | Cannot re-derive original citation keys | Write to a copy, or always run `m2_hierarchy` before `run_m2` |
-| `\import{dir/}{file}` unsupported | `m2_gather.py` | Includes in that form are not followed | Add to `INPUT_RE` handling |
-| No `.tex` for a version | `m2_content_dedup.py` | Records `status: "empty"` — correct behaviour | None |
-| `m2_hierarchy` output overwritten silently | `m2_hierarchy.py` | Re-running discards the previous tree | Acceptable; it is derived data |
+### 7.1 🔴 `m2_hierarchy` cannot be imported — missing `m2_macro_expansion`
+
+`src/parser/m2_hierarchy.py:45`:
+
+```python
+import m2_macro_expansion as ME
+```
+
+and line 446 calls `ME.preprocess_version_text(...)`. The module
+`src/parser/m2_macro_expansion.py` **does not exist and has never existed in any
+branch** (`git log --all -- '*m2_macro_expansion*'` returns nothing).
+`docs/CHANGELOG_M1_M2.md` describes it as part of a "two-layer LaTeX
+architecture" — that section describes code that was never committed.
+
+Consequences:
+
+- `import parser.m2_hierarchy` → `ModuleNotFoundError`.
+- `run_m2` (default steps) dies before parsing paper 1.
+- `test_m2_hierarchy.py` and `test_m2_parser.py` and `test_m2_pipeline.py` fail at
+  **collection**, not at assertion.
+
+Two honest ways out:
+
+| Option | Change | Cost |
+|--------|--------|------|
+| A. Delete the dependency | Remove the `import`, delete line 446, keep `m2_hierarchy` self-contained | Loses macro expansion for trees; `m2_cleanup.collect_macros`/`expand_user_macros` already do it in the `content` step |
+| B. Write the module | Add `m2_macro_expansion.py` exposing `preprocess_version_text(vdir)` delegating to `m2_cleanup.collect_macros` + `expand_user_macros` | ~15 lines; keeps the intended two-layer design |
+
+Option B is the smaller, intent-preserving change. `docs/CHANGELOG_M1_M2.md`
+should then be corrected either way.
+
+### 7.2 🔴 Seven test files fail at collection
+
+`pytest src/tests` collects only **81 of ~150** tests. Broken:
+
+| Test file | Failure |
+|---|---|
+| `test_m1_metadata.py` | imports the deleted `crawler.m1_metadata` |
+| `test_m1_references.py` | imports `crawl_references`, which `run_m1` no longer exports |
+| `test_m2_bibliography.py` | imports `rewrite_citations` (now `rewrite_citations_with_count`) |
+| `test_m2_export_parquet.py` | imports the deleted `parser.m2_export_parquet` |
+| `test_m2_hierarchy.py` | `ModuleNotFoundError: m2_macro_expansion` |
+| `test_m2_parser.py` | same import chain |
+| `test_m2_pipeline.py` | same import chain |
+
+Of the 81 that do collect, **4 fail** (`test_m2_text.py`,
+`test_run_m1_downloader.py`). The changelog's "21 tests all pass" refers to a
+scratch run, not this suite.
+
+### 7.3 🟠 `.bib` fallback may over-read
+
+`_bib_files` falls back to *every* `.bib` in the version when no
+`\bibliography{}`/`\addbibresource{}` matches. For a paper that ships several
+`.bib` files (one real bibliography, one for a supplementary appendix), this
+inflates `bibtex_entries_ingested` and can create spurious `canonical_entries`.
+`bib_fallback_versions` is the counter to watch. Consider requiring a non-empty
+`\cite`-set intersection before falling back.
+
+### 7.4 🟠 `@string` macros still not expanded
+
+`@string{jmlr = "J
+
+ournal of Machine Learning Research"}` — `journal = jmlr` stays literal in the output row. Add a pre-pass collecting `@string{...}` definitions before `_balanced_entries`.
+
+### 7.5 🟠 `\bibitem` parsing is heuristic
+
+`parse_bibitems` infers authors/title from layout, not from a grammar. Papers with unusual bibliography styles yield entries whose `title` is empty, which then shows up in `candidate_generation_skipped_by_reason["missing_title"]`. Acceptable, but report the number rather than hiding it.
+
+### 7.6 🟡 `\import{dir/}{file}` includes not followed
+
+`m2_gather.expand_includes` handles `\input`/`\include` but not `\import`/`\subimport`. A paper using them loses sections from the tree. Add to the input-command regex table.
+
+### 7.7 🟡 Nested braces inside `\cite{}`
+
+`m2_bib_dedup._CITE_RE` uses `\{([^{}]*)\}`, so `\cite{a{b}}` is not matched. Rare; documented rather than fixed.
+
+### 7.8 🟡 `m2_hierarchy` overwrites `tree_raw.json` silently
+
+Re-running the `tree` step discards the previous tree. It is derived data, so acceptable, but there is no `.bak`.
+
+### 7.9 🟡 `m2_hierarchy` stops at `paragraph`
+
+M3's feature extraction expects sentences. That conversion lives in `m2_content_dedup.flatten_tree`, so the `tree` and `content` steps are not optional companions — running `--steps tree` alone gives no `elements.json`.
+
+### 7.10 🟡 `unknown_commands` counter is never reset in-process
+
+`m2_cleanup` keeps its `Counter` at module level. `run()` calls
+`cleanup.save_unknown_commands_stats(...)` at the end but never
+`cleanup.reset_unknown_commands()`, so a second `run()` in the same process (which
+is what the test suite and any notebook do) writes cumulative, not per-run,
+numbers:
+
+```python
+num_cmds, num_total = cleanup.save_unknown_commands_stats(
+    str(out_dir / "unknown_commands.json"))
+if num_cmds > 0:
+    log(f"[m2] Đã ghi {num_cmds} lệnh lạ ({num_total} lần xuất hiện) vào ...")
+```
+
+Fix: call `cleanup.reset_unknown_commands()` immediately after saving.
+
+### 7.11 🟢 `.tex` files are no longer mutated
+
+The old `run_m2` overwrote `.tex` files with renamed citations. It now only
+**counts** rewrites (`rewrite_citations_with_count(...)[1]`), so `data/` stays
+pristine. This means `citation_keys_rewritten` is a *would-rename* figure, and
+`cite_map.json` is what `m2_content_dedup` uses to rename during hashing.
+
+### 7.12 🟡 Four helpers are defined twice in `m2_cleanup.py`
+
+`_balanced_end`, `_skip_ws`, `_skip_argument` and `_skip_optionals` each appear
+twice in the same file — first at lines 191/209/215/228, then again at
+516/534/540/553. The bodies are identical apart from the type annotation
+(`Optional[int]` vs `int | None`). Python keeps the second definition, so the
+code works, but the file reads as if there were two layers when there is only
+one. Delete the first block.
 
 ---
 
 ## 8. Testing
 
-Current coverage (`pytest src/tests`):
+Current state (`pytest src/tests`), after the upstream M1/M2 rework:
 
-| Test file | Covers |
-|-----------|--------|
-| `test_m2_parser.py` | `parse_bibtex_entries`, `deduplicate_keys`, `rewrite_citations`, `generate_candidates` |
-| `test_m2_gather.py` | Root detection and include traversal |
-| `test_m2_hierarchy.py` | Tree building, References exclusion |
-| `test_m2_text.py` | `clean_text`, `normalize_block_math`, `split_sentences` |
-| `test_m2_export_parquet.py` | Schema writing and integrity validation |
+| Test file | Collects? | Notes |
+|---|---|---|
+| `test_m2_gather.py` | ✅ 55 tests | Root detection and include traversal — all pass |
+| `test_m2_text.py` | ✅ 22 tests | `clean_text`, `normalize_block_math`, `split_sentences` |
+| `test_run_m1_downloader.py` | ✅ 4 tests | M1 downloader |
+| `test_m2_hierarchy.py` | ❌ | `ModuleNotFoundError: m2_macro_expansion` |
+| `test_m2_parser.py` | ❌ | same import chain |
+| `test_m2_pipeline.py` | ❌ | same import chain |
+| `test_m2_bibliography.py` | ❌ | `ImportError: rewrite_citations` |
+| `test_m2_export_parquet.py` | ❌ | module deleted |
+| `test_m1_metadata.py` | ❌ | module deleted |
+| `test_m1_references.py` | ❌ | `ImportError: crawl_references` |
 
-Not covered: `m2_content_dedup` cross-version ID stability, `cite_map` renaming, `run_m2` end-to-end.
+**Net: 10 files, 7 fail at collection, 81 tests collect, 4 of those fail.**
+
+Not covered even after the fixes: `m2_content_dedup` cross-version ID stability,
+`cite_map` renaming, `run_m2` end-to-end.
 
 ---
 
@@ -527,4 +861,6 @@ Not covered: `m2_content_dedup` cross-version ID stability, `cite_map` renaming,
 - **Reviewer:** P1 ↔ P3, P2 ↔ P4
 - **Design decision:** Dedup identity for references is `(title, authors, year)` rather than a hash of the whole entry, because versions legitimately drop and add fields (the statement's own `vaswani2017` → `vit_transformer` example).
 - **Design decision:** Elements are deduplicated **after** cleanup so that spacing and formatting differences do not prevent a match, as the statement requires.
-- **Open question:** Should `run_m2.py` also invoke `m2_hierarchy` and `m2_content_dedup` so there is a single M2 command? Currently they are separate.
+- **Design decision (new):** `run_m2` was collapsed from three scripts into one with `--steps bib,tree,content`. Good for reproducibility; bad for debuggability while `tree` is broken — hence the `--steps` escape hatch.
+- **Open question:** Should `tree` failures be downgraded from a hard exception to a recorded `entry["error"]`? The current `except Exception` already does this per paper, but the `ModuleNotFoundError` happens on `import`, i.e. before the loop, so no paper is even attempted.
+- **Open question:** Should `--export` be the default? Today a plain `python -m run_m2` leaves no Parquet and M3 has nothing to read.

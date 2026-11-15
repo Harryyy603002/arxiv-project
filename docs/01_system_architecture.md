@@ -6,23 +6,26 @@
 arxiv-project/
 ├── src/
 │   ├── run_m1.py               # M1 integrated entry point
-│   ├── run_m2.py               # M2 BibTeX + candidate pipeline entry point
+│   ├── run_m2.py               # M2 pipeline: bib → tree → content (+ --export)
 │   ├── run_m3.py               # M3 skeleton (not yet implemented)
 │   ├── crawler/
-│   │   ├── m1_metadata.py      # arXiv API → meta.json + versions.json
-│   │   ├── m1_download.py      # source archive download + extraction
-│   │   └── m1_references.py    # Semantic Scholar reference crawl
+│   │   ├── m1_download.py      # source archive download + extraction (library only)
+│   │   ├── m1_references.py    # Semantic Scholar reference crawl
+│   │   ├── m1_tables.py        # build papers/references Parquet + CSV
+│   │   └── m1_aggregate.py     # merge multi-session benchmark logs
 │   ├── parser/
 │   │   ├── m2_gather.py        # find root .tex + collect compilation path
 │   │   ├── m2_hierarchy.py     # build section/paragraph/sentence tree
-│   │   ├── m2_cleanup.py       # LaTeX cleanup + math normalization
+│   │   ├── m2_cleanup.py       # LaTeX cleanup, macro expansion, math normalization
 │   │   ├── m2_sentences.py     # sentence splitting
-│   │   ├── m2_bibitem.py       # parse BibTeX entries from .bib files
+│   │   ├── m2_bibitem.py       # parse .bib files AND inline \bibitem
 │   │   ├── m2_bib_dedup.py     # dedup + rewrite \\cite keys
 │   │   ├── m2_content_dedup.py # cross-version element dedup → elements.json + hierarchy.json
-│   │   └── m2_export_parquet.py # write Parquet tables for M2
+│   │   ├── m2_inspect.py       # human-readable dump of one paper's M2 output
+│   │   └── m2_pick_papers.py   # list papers suitable for M3 manual labeling
 │   ├── matching/
 │   │   ├── m3_candidates.py    # generate BibTeX↔reference candidate pairs
+│   │   ├── m3_pick_papers.py   # same selection logic as m2_pick_papers
 │   │   ├── m3_auto_labeler.py  # skeleton
 │   │   ├── m3_string_features.py # skeleton
 │   │   ├── m3_context_features.py # skeleton
@@ -33,14 +36,19 @@ arxiv-project/
 │   ├── utils/
 │   │   ├── config.py           # shared paths, ID helpers, API config
 │   │   ├── benchmark.py        # PerfRecorder + ResourceMonitor
-│   │   └── schemas.py          # PyArrow schemas for all 6 tables
-│   └── tests/
-│       └── ...                 # 14 pytest tests (all passing)
-├── docs/                       # this documentation
+│   │   └── schemas.py          # PyArrow schemas + export_m2_parquet
+│   └── tests/                  # 10 test files (collection currently broken — see 07)
+├── docs/
 ├── data/                       # output data (not committed)
 ├── requirements.txt
-└── README.md
+├── README.md
+└── README_M2.md                # collaborator's M2 deep-dive
 ```
+
+> **Removed since the previous doc revision:** `crawler/m1_metadata.py` and
+> `parser/m2_export_parquet.py` were deleted upstream. Discovery and version
+> enumeration now live inside `run_m1.py`; Parquet export moved into
+> `run_m2.py --export`, which calls `utils.schemas.export_m2_parquet`.
 
 ---
 
@@ -48,28 +56,33 @@ arxiv-project/
 
 ```mermaid
 flowchart TD
-  IDs["IDs.txt\n(assigned range)"]
-  IDs --> M1_meta["m1_metadata.py\narXiv API discovery"]
-  M1_meta --> meta["data/<paper_key>/meta.json\ndata/<paper_key>/versions.json"]
-  meta --> M1_down["m1_download.py\nsource download"]
-  M1_down --> tex["data/<paper_key>/v{N}/*.tex, *.bib\ndata/<paper_key>/v{N}/metadata.json"]
-  IDs --> M1_refs["m1_references.py\nSemantic Scholar batch"]
-  M1_refs --> refs["data/<paper_key>/refs.json\ndata/<paper_key>/refs_raw.json"]
+  IDs["ID.txt\n(IDs or ID ranges)"]
+  IDs --> M1_disc["run_m1.discover()\narXiv API + discovery_cache.json"]
+  M1_disc --> info["info dict (in memory)\nn_versions + version_dates"]
+  info --> M1_crawl["run_m1.crawl_batch()"]
+  M1_crawl --> paper["data/&lt;paper_key&gt;/paper.json"]
+  M1_crawl --> tex["data/&lt;paper_key&gt;/v{N}/*.tex, *.bib\ndata/&lt;paper_key&gt;/v{N}/metadata.json"]
+  M1_crawl --> refs["data/&lt;paper_key&gt;/refs.json\ndata/&lt;paper_key&gt;/refs_raw.json\ndata/&lt;paper_key&gt;/v{N}/references.json"]
+  M1_crawl --> tables["m1_tables.build_all()\npapers.parquet, references.parquet"]
 
-  tex --> M2_gather["m2_gather.py\nfind root + compilation files"]
-  M2_gather --> M2_hier["m2_hierarchy.py\nbuild tree → tree_raw.json"]
-  M2_hier --> M2_dedup["m2_content_dedup.py\nclean + sentence split + dedup"]
-  M2_dedup --> elements["data/<paper_key>/elements.json\ndata/<paper_key>/hierarchy.json"]
+  tex --> M2_bib["run_m2: bib step\nparse .bib + \\bibitem → dedup → cite_map"]
+  M2_bib --> bibtex["data/&lt;paper_key&gt;/bibtex_merged.json\ncite_map.json, candidates.json"]
+  refs --> M2_bib
 
-  tex --> M2_bib["m2_bibitem.py + m2_bib_dedup.py\nparse + dedup BibTeX"]
-  M2_bib --> bibtex["data/<paper_key>/bibtex_merged.json"]
-  bibtex --> M2_cand["m3_candidates.py\ncandidate pair generation"]
-  refs --> M2_cand
-  M2_cand --> candidates["data/<paper_key>/candidates.json"]
+  tex --> M2_tree["run_m2: tree step\nm2_hierarchy.parse_version → tree_raw.json"]
+  M2_tree --> M2_content["run_m2: content step\nm2_content_dedup → elements.json + hierarchy.json"]
 
-  candidates --> M3["M3 pipeline (skeleton)\nm3_auto_labeler → m3_model → m3_evaluate"]
+  bibtex --> M2_export["run_m2 --export\nexport_m2_parquet"]
+  M2_content --> M2_export
+  M2_export --> pq["export/elements.parquet\nexport/hierarchy.parquet\nexport/bibtex.parquet"]
+
+  pq --> M3["M3 pipeline (skeleton)\nm3_auto_labeler → m3_model → m3_evaluate"]
   M3 --> preds["predictions table"]
 ```
+
+`run_m2` now drives all three M2 steps itself (`bib`, `tree`, `content`), which
+closes the old "run_m2 never calls m2_hierarchy" gap. The tree step is still
+fragile — see [04_m2_parsing.md](04_m2_parsing.md) §7.
 
 ---
 
@@ -94,15 +107,26 @@ flowchart TD
 | `paper_key(id)` | `2310.12345` → `2310-12345`, `hep-th/9901001` → `hep-th-9901001` | **folder names** (`data/<paper_key>/`) |
 | raw `arxiv_id` | `2310.12345` | **inside JSON files** (never use paper_key in data fields) |
 
-The `run_m1.py` integrated runner uses its own `folder_name()` which does the same thing (`.` → `-`, `/` → `_`) but with a different separator for `/`. This creates a slight inconsistency with the standalone `m1_download.py` output layout. See [06_integration.md](06_integration.md) for details.
+`run_m1.folder_name()` is now a one-line delegate to `C.paper_key()`, so the two
+naming schemes that used to diverge (`.` → `-` vs `.` → `-`, `/` → `_` vs `/` → `-`)
+are unified. That closes the old §4.1 defect in
+[06_integration.md](06_integration.md); old-style IDs like `hep-th/9901001` now
+resolve to the same directory everywhere.
+
+M2 never trusts the directory name to recover the ID. `run_m2.paper_arxiv_id()`
+and `m2_hierarchy.read_arxiv_id()` both read `paper.json`, because
+`2602-04870` cannot be turned back into `2602.04870` or `hep-th/9901001`.
 
 ---
 
 ## External APIs
 
 | API | Endpoint | Rate limit | Config |
-|-----|----------|-----------|--------|
+| ----- | ---------- | ----------- | -------- |
 | arXiv metadata | `http://export.arxiv.org/api/query` | 3 s between calls | `C.ARXIV_DELAY_SECONDS = 3.0` |
 | arXiv source | `https://export.arxiv.org/src/{id}v{N}` | 3 s between calls | `C.ARXIV_SRC_URL` |
 | Semantic Scholar single | `https://api.semanticscholar.org/graph/v1/paper/arXiv:{id}` | 1 req/s (key) or ~0.33 req/s (no key) | `C.S2_API_URL` |
 | Semantic Scholar batch | `https://api.semanticscholar.org/graph/v1/paper/batch` | same | `m1_references.BATCH_URL` |
+
+Only `export.arxiv.org` is used. `arxiv.org/src/...` returns HTTP 403, and
+`m1_download.BASE_URL` is hardcoded to the export mirror for that reason.

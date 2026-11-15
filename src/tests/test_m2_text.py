@@ -25,8 +25,9 @@ def test_clean_figure_keeps_structure_drops_placement():
     s = (r"\begin{figure}[htpb] \centering \includegraphics[width=\linewidth]{a.png}"
          r" \caption{A \textbf{plot}.} \label{fig:a} \end{figure}")
     out = clean_figure(s)
+    # \label được protect_citations_and_refs giữ nguyên (cùng nhóm với \cite/\ref)
     assert out == (r"\begin{figure} \includegraphics[width=\linewidth]{a.png}"
-                   r" \caption{A plot.} \end{figure}")
+                   r" \caption{A plot.} \label{fig:a} \end{figure}")
 
 
 def test_table_rules_removed():

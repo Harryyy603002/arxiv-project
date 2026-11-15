@@ -71,6 +71,8 @@ def test_run_m1_uses_canonical_downloader_and_checkpoints_versions(tmp_path, mon
         "crawled_versions": 0,
         "failed_versions": 0,
         "not_found_papers": 0,
+        "cached_versions": 0,
+        "cached_refs_papers": 0,
     }
     perf = FakePerf()
 
@@ -118,6 +120,9 @@ def test_save_source_with_stats_extracts_and_accounts_in_one_pass(tmp_path):
 
 
 def test_crawl_batch_overlaps_reference_and_source_work(tmp_path, monkeypatch):
+    from utils import config as C
+
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path)  # tránh refs.json còn sót của lần chạy trước
     reference_started = threading.Event()
     source_started = threading.Event()
 
@@ -154,6 +159,8 @@ def test_crawl_batch_overlaps_reference_and_source_work(tmp_path, monkeypatch):
         "crawled_versions": 0,
         "failed_versions": 0,
         "not_found_papers": 0,
+        "cached_versions": 0,
+        "cached_refs_papers": 0,
     }
 
     run_m1.crawl_batch(
@@ -165,19 +172,32 @@ def test_crawl_batch_overlaps_reference_and_source_work(tmp_path, monkeypatch):
 
 
 def test_standalone_process_writes_atomic_stats_checkpoint(tmp_path, monkeypatch):
-    monkeypatch.setattr(m1_download, "version_dir", lambda _aid, _version: tmp_path / "v1")
+    """crawl_batch ghi vN/metadata.json qua .tmp + replace (không để lại file dở dang)."""
     monkeypatch.setattr(
-        m1_download,
-        "fetch_source",
+        m1_download, "fetch_source",
         lambda _session, _aid, _version: b"\\documentclass{article}",
     )
-
-    assert m1_download.process_version(object(), "1234.56789", 1) == "ok"
-
-    record = json.loads(
-        (tmp_path / "v1" / "source_status.json").read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        m1_download, "save_source_with_stats",
+        lambda data, out: (out.mkdir(parents=True, exist_ok=True),
+                           (out / "main.tex").write_bytes(data),
+                           ("ok", "", ["main.tex"], len(data), len(data), len(data)))[-1],
     )
-    assert record["raw_bytes"] == len(b"\\documentclass{article}")
-    assert record["uncompressed_bytes"] == len(b"\\documentclass{article}")
-    assert record["extracted_bytes"] == len(b"\\documentclass{article}")
-    assert not (tmp_path / "v1" / "source_status.json.tmp").exists()
+    monkeypatch.setattr(
+        run_m1.m1_references, "fetch_batch_group",
+        lambda _session, group: [{"references": []} for _ in group],
+    )
+
+    info = {"1234.56789": {"title": "T", "authors": [], "venue": None, "n_versions": 1,
+                           "version_dates": {1: "2020-01-01"}}}
+    coverage = {"expected_versions": 0, "crawled_versions": 0, "failed_versions": 0,
+                "not_found_papers": 0, "cached_versions": 0, "cached_refs_papers": 0}
+
+    run_m1.crawl_batch(["1234.56789"], info, FakePerf(), tmp_path, object(), coverage)
+
+    vdir = tmp_path / "1234-56789" / "v1"
+    record = json.loads((vdir / "metadata.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok"
+    assert record["bytes_before"] == len(b"\\documentclass{article}")
+    assert record["bytes_after"] == len(b"\\documentclass{article}")
+    assert not (vdir / "metadata.json.tmp").exists()

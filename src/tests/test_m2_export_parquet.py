@@ -1,4 +1,4 @@
-"""Test offline cho m2_export_parquet (không gọi mạng): pytest src/tests/test_m2_export_parquet.py"""
+"""Test offline cho utils.schemas.export_m2_parquet (không gọi mạng): pytest src/tests/test_m2_export_parquet.py"""
 import json
 import sys
 from pathlib import Path
@@ -8,7 +8,6 @@ import pyarrow.parquet as pq
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from parser import m2_export_parquet as E  # noqa: E402
 from utils import schemas as S  # noqa: E402
 
 
@@ -219,21 +218,23 @@ def test_validate_candidate_rows_rules():
 
 def test_cli_exports_and_prints_row_counts(corpus, tmp_path, monkeypatch, capsys):
     out = tmp_path / "export"
-    monkeypatch.setattr(sys, "argv", ["m2_export_parquet.py", "--corpus-dir", str(corpus),
-                                      "--out-dir", str(out)])
+    import run_m2
 
-    E.main()
+    monkeypatch.setattr(sys, "argv", ["run_m2.py", "--corpus-dir", str(corpus), "--export-only"])
+
+    run_m2.main(["--corpus-dir", str(corpus), "--export-only"])
 
     printed = capsys.readouterr().out
-    assert "elements.parquet: 7 dòng" in printed
-    assert "bibtex.parquet: 2 dòng" in printed
-    assert (out / "hierarchy.parquet").exists()
+    assert "'elements': 7" in printed
+    assert "'bibtex': 2" in printed
+    assert (corpus / "export" / "hierarchy.parquet").exists()
 
 
 def test_cli_default_out_dir_is_data_export(tmp_path, monkeypatch):
-    monkeypatch.setattr(E, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(sys, "argv", ["m2_export_parquet.py", "--corpus-dir", str(tmp_path / "empty")])
+    import run_m2
 
-    E.main()
+    monkeypatch.setattr(run_m2, "_corpus_dir", lambda: tmp_path / "data")
+
+    run_m2.main(["--export-only"])
 
     assert (tmp_path / "data" / "export" / "elements.parquet").exists()
