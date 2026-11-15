@@ -1,0 +1,17 @@
+{
+ "arxiv_id": "1810.04805",
+ "versions": {
+  "v1": {
+   "status": "ok",
+   "n_nodes": 375
+  },
+  "v2": {
+   "status": "ok",
+   "n_nodes": 394
+  }
+ },
+ "n_versions": 2,
+ "n_versions_ok": 2,
+ "n_nodes_before_dedup": 769,
+ "n_elements_after_dedup": 632
+}

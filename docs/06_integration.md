@@ -1,9 +1,9 @@
 # Integration — How the Milestones Connect
 
-> **Re-verified against `01b5bb0`.** Three of the six "known integration
-> problems" this document used to list are now **fixed**, two are still open,
-> and two new ones appeared. The fixed list is preserved in §5 so you can see
-> what the rework actually bought.
+> **Status:** M1 → M2 handoffs and the full `bib → tree → content → --export`
+> pipeline are operational and all 164 tests pass. M3 remains a skeleton aside
+> from `m3_candidates.py` and `m3_pick_papers.py`. Previous fixes are recorded
+> in §5 for context.
 
 The milestones are not independent programs. They pass data through the
 filesystem in a fixed order, and the only interface is a set of files.
@@ -31,12 +31,12 @@ ids.txt (or a range)
   │
   ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│ M2  —  python -m run_m2 [--steps bib,tree,content] [--export]    │
+│ M2  —  python src/run_m2.py [--steps bib,tree,content] [--export] │
 │                                                                   │
 │   step "bib"      run_m2.process_paper                            │
 │                     → bibtex_merged.json, candidates.json,       │
 │                       cite_map.json, m2_stats.json, …            │
-│   step "tree"     m2_hierarchy.process_paper   ⚠ see §4.1         │
+│   step "tree"     m2_hierarchy.process_paper                      │
 │                     → v{N}/tree_raw.json                          │
 │   step "content"  m2_content_dedup.process_paper                  │
 │                     → elements.json, hierarchy.json,              │
@@ -47,7 +47,7 @@ ids.txt (or a range)
   │
   ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│ M3  —  python -m run_m3          (still NotImplementedError)      │
+│ M3  —  python src/run_m3.py       (still NotImplementedError)     │
 │                                                                   │
 │   m3_candidates.generate_candidates   ✔ implemented, used by M2   │
 │   m3_auto_labeler / m3_*_features / m3_model / m3_evaluate        │
@@ -78,9 +78,9 @@ One row per real dependency. Full shapes are in
 | 8 | M2 `bib` | `cite_map.json` | M2 `content` | ✅ but ordering-sensitive (§4.4) |
 | 9 | M2 `bib` | `bibtex_merged.json` | M2 export, M3 | ✅ |
 | 10 | M2 `bib` | `candidates.json` | M3 | ✅ |
-| 11 | M2 `tree` | `v{N}/tree_raw.json` | M2 `content` | 🔴 blocked (§4.1) |
-| 12 | M2 `content` | `elements.json`, `hierarchy.json` | M2 export, M3 features | 🔴 blocked by #11 |
-| 13 | M2 export | `export/*.parquet` | final dataset | 🔴 blocked by #11 |
+| 11 | M2 `tree` | `v{N}/tree_raw.json` | M2 `content` | ✅ |
+| 12 | M2 `content` | `elements.json`, `hierarchy.json` | M2 export, M3 features | ✅ |
+| 13 | M2 export | `export/*.parquet` | final dataset | ✅ |
 | 14 | M3 | labels CSV | M3 | ❌ not built |
 | 15 | M3 | `predictions` | final dataset | ❌ not built |
 
@@ -105,13 +105,15 @@ python src/crawler/m1_tables.py --data-dir ./data
 python src/crawler/m1_aggregate.py --data-dir ./data
 
 # ── M2 ───────────────────────────────────────────────────────────────
-python -m run_m2 --corpus-dir data                 # all three steps
-python -m run_m2 --corpus-dir data --steps bib     # works today
-python -m run_m2 --corpus-dir data --steps content # needs "tree" output
-python -m run_m2 --corpus-dir data --export        # + Parquet tables
+python src/run_m2.py --corpus-dir data                 # all three steps
+python src/run_m2.py --corpus-dir data --steps bib     # BibTeX + candidates only
+python src/run_m2.py --corpus-dir data --steps tree    # build tree_raw.json
+python src/run_m2.py --corpus-dir data --steps content # reads tree_raw.json + cite_map.json
+python src/run_m2.py --corpus-dir data --export        # + Parquet tables
+# Note: `python -m run_m2 ...` also works when PYTHONPATH=src is set.
 
 # ── M3 ───────────────────────────────────────────────────────────────
-python -m run_m3        # skeleton — raises NotImplementedError
+python src/run_m3.py        # skeleton — raises NotImplementedError
 ```
 
 > **`m1_download.py` and `m1_references.py` no longer have a `__main__`.**
@@ -127,49 +129,24 @@ python -m run_m3        # skeleton — raises NotImplementedError
 
 ## 4. Known Integration Problems
 
-### 4.1 🔴 The `tree` step cannot import
+### 4.1 🟢 The `tree` step import failure (Resolved)
 
-`m2_hierarchy.py` line 45:
-
-```python
-import m2_macro_expansion as ME
-```
-
-That module has **never existed in any branch**. Consequences ripple through
-the whole pipeline:
-
-| Command | Result |
-|---|---|
-| `python -m run_m2` (default) | `ModuleNotFoundError` before paper 1 |
-| `python -m run_m2 --steps tree` | same |
-| `python -m run_m2 --steps content` | runs, but every version reports `no_tree_raw` |
-| `python -m run_m2 --steps bib` | ✅ works |
-| `python -m run_m2 --export` | writes empty Parquet tables |
-| `python src/parser/m2_hierarchy.py` | same `ModuleNotFoundError` |
-
-**The workaround that keeps M2 usable:** run `--steps bib` now, and accept that
-`elements.json` / `hierarchy.json` / the Parquet export are unavailable until
-this is fixed.
-
-**The fix:** `m2_hierarchy.py` line 46 already imports the real implementation:
+Previously `m2_hierarchy.py` line 45 imported a non-existent `m2_macro_expansion`
+module. It now imports directly from `m2_cleanup`:
 
 ```python
 from m2_cleanup import expand_user_macros
 ```
 
-So either delete line 45 and line 446 (`ME.preprocess_version_text`), or add a
-small `m2_macro_expansion.py` that delegates to
-`m2_cleanup.collect_macros` + `expand_user_macros`. The shim is the lower-risk
-option because it preserves the intended two-layer design.
+All three steps (`bib`, `tree`, `content`) plus `--export` and standalone
+`python src/parser/m2_hierarchy.py --outline` run cleanly. Running
+`--steps content` in a separate invocation works whenever `tree` has already
+written `v{N}/tree_raw.json` to disk.
 
-> `docs/CHANGELOG_M1_M2.md` describes `m2_macro_expansion.py` as committed. It
-> is not. That changelog is the reason this defect went unnoticed for a while.
+### 4.2 🟢 Test suite collection (Resolved)
 
-### 4.2 🔴 Seven test files fail at collection
-
-`pytest src/tests` collects only 81 tests instead of ~150. The integration
-consequence is that **CI cannot tell you whether a handoff broke**. See
-[07_testing_and_performance.md](./07_testing_and_performance.md) §1.3.
+All 10 test files now collect cleanly and pass (**164/164 tests**). See
+[07_testing_and_performance.md](./07_testing_and_performance.md) §1.
 
 ### 4.3 🟠 `v{N}/references.json` is a redundant, differently-shaped copy
 
@@ -204,7 +181,7 @@ nothing warns you.
 | `run_m1.py` | `--corpus-dir` is **required** |
 | `run_m2.run()` | `data/corpus/` if it exists, else `data/` |
 
-`run_m2` has no `--corpus-dir` requirement, so a bare `python -m run_m2` picks
+`run_m2` has no `--corpus-dir` requirement, so a bare `python src/run_m2.py` picks
 `data/` even if your M1 run used `data/corpus/`. Passing `--corpus-dir` to both
 is the only safe convention.
 
@@ -226,11 +203,12 @@ and the run still "succeeds".
 **Watch:** `parse_success_rate` in `benchmark/m2_benchmark.json`. If it is
 below ~0.95, read the `error` fields before trusting any table.
 
-### 4.7 🟡 `predictions` schema cannot hold `partition` or `cand_1..5`
+### 4.7 🟢 `predictions` schema updated for `partition` and `cand_1..5` (Resolved)
 
-`PREDICTIONS_SCHEMA` has four columns and no `partition`. If the statement
-requires a train/valid/test split, it must be stored elsewhere (or the schema
-must change). See [02_data_contracts.md](./02_data_contracts.md) §4.2.
+`PREDICTIONS_SCHEMA` in `src/utils/schemas.py` now uses the nine-column flat
+layout required by the statement (`arxiv_id`, `partition`, `citation_key`,
+`groundtruth_arxiv_id`, `cand_1`…`cand_5`), replacing the old
+`predicted_arxiv_ids` list column. See [02_data_contracts.md](./02_data_contracts.md) §4.2.
 
 ### 4.8 🟢 `run_m2` no longer mutates `.tex` files
 
@@ -246,11 +224,11 @@ citation_occurrences = sum(
 `data/` stays pristine, `m2_hierarchy` can be re-run safely, and
 `citation_keys_rewritten` in `m2_stats.json` is a *would-rename* figure.
 
-### 4.9 🟢 `run_m2` now does call `m2_hierarchy` and `m2_content_dedup`
+### 4.9 🟢 `run_m2` calls `m2_hierarchy` and `m2_content_dedup`
 
 The old defect "`run_m2.py` never calls `m2_hierarchy`" is gone. `run()` has
-explicit `if "tree" in steps` and `if "content" in steps` blocks. It would work
-today were it not for §4.1.
+explicit `if "tree" in steps` and `if "content" in steps` blocks and executes all
+three steps cleanly.
 
 ### 4.10 🟢 `run_m2` no longer skips papers with no `.bib`
 
@@ -311,12 +289,8 @@ Rules that every milestone must follow. Breaking one breaks a downstream stage.
   resume, cheap to inspect, and a partial corpus is still usable. The cost is
   that shape mismatches (§4.3) are only caught at read time.
 - **Design decision:** `run_m2` was collapsed from four scripts into one with
-  `--steps`. Reproducibility improved; debuggability got worse while `tree` is
-  broken — hence the escape hatch.
+  `--steps`. This improves reproducibility while allowing individual steps (`bib`,
+  `tree`, `content`) to be run separately when debugging.
 - **Open question:** should `--export` be the default? Today a plain
-  `python -m run_m2` leaves no Parquet, so M3 has nothing to read even once
-  `tree` works.
-- **Open question:** should `run_m2` fail fast when `m2_hierarchy` cannot be
-  imported, rather than logging 40,000 identical `error` entries? A cheap
-  pre-flight `importlib.util.find_spec("parser.m2_macro_expansion")` would do
-  it.
+  `python src/run_m2.py` leaves no Parquet until `--export` or `--export-only`
+  is passed.

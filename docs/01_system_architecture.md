@@ -35,9 +35,10 @@ arxiv-project/
 │   │   └── m3_publish_hf.py    # skeleton
 │   ├── utils/
 │   │   ├── config.py           # shared paths, ID helpers, API config
+│   │   ├── logger.py           # shared pipeline formatter and logger setup
 │   │   ├── benchmark.py        # PerfRecorder + ResourceMonitor
 │   │   └── schemas.py          # PyArrow schemas + export_m2_parquet
-│   └── tests/                  # 10 test files (collection currently broken — see 07)
+│   └── tests/                  # 10 test files (164 tests, all passing — see 07)
 ├── docs/
 ├── data/                       # output data (not committed)
 ├── requirements.txt
@@ -80,9 +81,8 @@ flowchart TD
   M3 --> preds["predictions table"]
 ```
 
-`run_m2` now drives all three M2 steps itself (`bib`, `tree`, `content`), which
-closes the old "run_m2 never calls m2_hierarchy" gap. The tree step is still
-fragile — see [04_m2_parsing.md](04_m2_parsing.md) §7.
+`run_m2` drives all three M2 steps itself (`bib`, `tree`, `content`) plus
+optional `--export`, closing the old "`run_m2` never calls `m2_hierarchy`" gap.
 
 ---
 

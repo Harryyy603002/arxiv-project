@@ -510,12 +510,12 @@ now calls `m2_hierarchy` and `m2_content_dedup` itself instead of leaving them a
 separate scripts.
 
 ```bash
-python -m run_m2                                   # all three steps, every paper
-python -m run_m2 --steps bib                       # BibTeX + candidates only
-python -m run_m2 --steps tree,content              # LaTeX parsing only
-python -m run_m2 --ids 2602.04870 --limit 5
-python -m run_m2 --export                          # ...then write the Parquet tables
-python -m run_m2 --export-only                     # skip parsing, only export
+python src/run_m2.py                                   # all three steps, every paper
+python src/run_m2.py --steps bib                       # BibTeX + candidates only
+python src/run_m2.py --steps tree,content              # LaTeX parsing only
+python src/run_m2.py --ids 2602.04870 --limit 5
+python src/run_m2.py --export                          # ...then write the Parquet tables
+python src/run_m2.py --export-only                     # skip parsing, only export
 ```
 
 **Three ordered steps** (`ALL_STEPS = ("bib", "tree", "content")`):
@@ -528,12 +528,9 @@ python -m run_m2 --export-only                     # skip parsing, only export
 
 When `--export`/`--export-only` is set, `export_m2_parquet(corpus_dir=root,
 out_dir=root/"export")` runs inside a `PerfRecorder` stage and produces
-`elements.parquet`, `hierarchy.parquet`, `bibtex.parquet`.
-
-> **§7.1 blocker:** the `tree` step imports `m2_hierarchy`, which imports the
-> missing `m2_macro_expansion` module. `--steps bib` and `--steps content` work;
-> `--steps tree` (and therefore the default no-flags run) raises
-> `ModuleNotFoundError` before the first paper is parsed.
+`elements.parquet`, `hierarchy.parquet`, `bibtex.parquet`. All three steps
+run cleanly end-to-end (`m2_hierarchy` imports `expand_user_macros` from
+`m2_cleanup`).
 
 **`process_paper(paper_dir)` — the `bib` step, line by line:**
 
@@ -630,8 +627,8 @@ The standalone `src/parser/m2_export_parquet.py` **no longer exists**; the expor
 is reached through `run_m2 --export`.
 
 ```bash
-python -m run_m2 --export-only            # corpus default
-python -m run_m2 --export --corpus-dir data/corpus
+python src/run_m2.py --export-only            # corpus default
+python src/run_m2.py --export --corpus-dir data/corpus
 ```
 
 `export_m2_parquet(corpus_dir, out_dir)`:
@@ -692,74 +689,44 @@ every one of these resolves under the corpus you passed on the command line.
 ## 6. Practical Run Order
 
 ```bash
-# Step 1 — BibTeX + citations + candidates (works today)
-python -m run_m2 --steps bib --ids 2602.04870
+# Step 1 — BibTeX + citations + candidates
+python src/run_m2.py --steps bib --ids 2602.04870
 
-# Step 2 — LaTeX trees (blocked until §7.1 is fixed)
-python -m run_m2 --steps tree --ids 2602.04870
+# Step 2 — LaTeX trees
+python src/run_m2.py --steps tree --ids 2602.04870
 
 # Step 3 — clean, split sentences, dedup across versions
-python -m run_m2 --steps content --ids 2602.04870
+python src/run_m2.py --steps content --ids 2602.04870
 
 # Step 4 — everything + Parquet, whole corpus
-python -m run_m2 --export
+python src/run_m2.py --export
 ```
 
-`--steps bib` and `--steps content` are independent; `content` needs `tree` output
-to be useful, and `tree` currently cannot import.
+`--steps bib` and `--steps tree` are independent; `content` reads `v{N}/tree_raw.json`
+and `cite_map.json` from disk, so `bib` and `tree` should run before `content`.
 
 ---
 
 ## 7. Known Issues and Improvements
 
-### 7.1 🔴 `m2_hierarchy` cannot be imported — missing `m2_macro_expansion`
+### 7.1 🟢 `m2_hierarchy` macro-expansion import (Resolved)
 
-`src/parser/m2_hierarchy.py:45`:
+Earlier commits broke `m2_hierarchy.py:45` by importing a non-existent
+`m2_macro_expansion` module. That import has been replaced with:
 
 ```python
-import m2_macro_expansion as ME
+from m2_cleanup import expand_user_macros
 ```
 
-and line 446 calls `ME.preprocess_version_text(...)`. The module
-`src/parser/m2_macro_expansion.py` **does not exist and has never existed in any
-branch** (`git log --all -- '*m2_macro_expansion*'` returns nothing).
-`docs/CHANGELOG_M1_M2.md` describes it as part of a "two-layer LaTeX
-architecture" — that section describes code that was never committed.
+and `parse_version` now calls `full_text = expand_user_macros(full_text)`. Both
+`run_m2.py --steps tree` and `m2_hierarchy.py --outline` run without import errors.
 
-Consequences:
+### 7.2 🟢 Test suite modernization (Resolved)
 
-- `import parser.m2_hierarchy` → `ModuleNotFoundError`.
-- `run_m2` (default steps) dies before parsing paper 1.
-- `test_m2_hierarchy.py` and `test_m2_parser.py` and `test_m2_pipeline.py` fail at
-  **collection**, not at assertion.
-
-Two honest ways out:
-
-| Option | Change | Cost |
-|--------|--------|------|
-| A. Delete the dependency | Remove the `import`, delete line 446, keep `m2_hierarchy` self-contained | Loses macro expansion for trees; `m2_cleanup.collect_macros`/`expand_user_macros` already do it in the `content` step |
-| B. Write the module | Add `m2_macro_expansion.py` exposing `preprocess_version_text(vdir)` delegating to `m2_cleanup.collect_macros` + `expand_user_macros` | ~15 lines; keeps the intended two-layer design |
-
-Option B is the smaller, intent-preserving change. `docs/CHANGELOG_M1_M2.md`
-should then be corrected either way.
-
-### 7.2 🔴 Seven test files fail at collection
-
-`pytest src/tests` collects only **81 of ~150** tests. Broken:
-
-| Test file | Failure |
-|---|---|
-| `test_m1_metadata.py` | imports the deleted `crawler.m1_metadata` |
-| `test_m1_references.py` | imports `crawl_references`, which `run_m1` no longer exports |
-| `test_m2_bibliography.py` | imports `rewrite_citations` (now `rewrite_citations_with_count`) |
-| `test_m2_export_parquet.py` | imports the deleted `parser.m2_export_parquet` |
-| `test_m2_hierarchy.py` | `ModuleNotFoundError: m2_macro_expansion` |
-| `test_m2_parser.py` | same import chain |
-| `test_m2_pipeline.py` | same import chain |
-
-Of the 81 that do collect, **4 fail** (`test_m2_text.py`,
-`test_run_m1_downloader.py`). The changelog's "21 tests all pass" refers to a
-scratch run, not this suite.
+All 7 previously failing test imports (`m1_metadata`, `crawl_references`,
+`rewrite_citations`, `m2_export_parquet`, `m2_macro_expansion`) and runtime
+mismatches have been updated to match the refactored M1/M2 APIs. All 10 test
+files (**164 tests**) now collect and pass (`python -m pytest src/tests -q`).
 
 ### 7.3 🟠 `.bib` fallback may over-read
 
@@ -833,25 +800,22 @@ one. Delete the first block.
 
 ## 8. Testing
 
-Current state (`pytest src/tests`), after the upstream M1/M2 rework:
+Current state (`pytest src/tests`):
 
-| Test file | Collects? | Notes |
+| Test file | Result | Notes |
 |---|---|---|
-| `test_m2_gather.py` | ✅ 55 tests | Root detection and include traversal — all pass |
-| `test_m2_text.py` | ✅ 22 tests | `clean_text`, `normalize_block_math`, `split_sentences` |
-| `test_run_m1_downloader.py` | ✅ 4 tests | M1 downloader |
-| `test_m2_hierarchy.py` | ❌ | `ModuleNotFoundError: m2_macro_expansion` |
-| `test_m2_parser.py` | ❌ | same import chain |
-| `test_m2_pipeline.py` | ❌ | same import chain |
-| `test_m2_bibliography.py` | ❌ | `ImportError: rewrite_citations` |
-| `test_m2_export_parquet.py` | ❌ | module deleted |
-| `test_m1_metadata.py` | ❌ | module deleted |
-| `test_m1_references.py` | ❌ | `ImportError: crawl_references` |
+| `test_m2_gather.py` | ✅ 55 passed | Root detection and include traversal |
+| `test_m2_hierarchy.py` | ✅ 33 passed | Section nesting, math/figure/list leaves, include expansion |
+| `test_m2_text.py` | ✅ 22 passed | `clean_text`, `clean_figure`, `normalize_block_math`, `split_sentences` |
+| `test_m2_bibliography.py` | ✅ 4 passed | `\bibitem`, `deduplicate_keys`, `rewrite_citations_with_count`, `run_m2.run` |
+| `test_m2_parser.py` | ✅ 5 passed | BibTeX provenance, `cite_map`, candidate generation (`m3_candidates`) |
+| `test_m2_pipeline.py` | ✅ 7 passed | End-to-end M1-layout → M2 Parquet pipeline |
+| `test_m2_export_parquet.py` | ✅ 18 passed | Schema roundtrips (including 9-column `PREDICTIONS_SCHEMA`), integrity, CLI |
+| `test_m1_metadata.py` | ✅ 5 passed | `run_m1` ID/range parsing & `paper_key` |
+| `test_m1_references.py` | ✅ 11 passed | S2 batch crawling, deduplication, `REFERENCES_SCHEMA` |
+| `test_run_m1_downloader.py` | ✅ 4 passed | Archival extraction & checkpointing |
 
-**Net: 10 files, 7 fail at collection, 81 tests collect, 4 of those fail.**
-
-Not covered even after the fixes: `m2_content_dedup` cross-version ID stability,
-`cite_map` renaming, `run_m2` end-to-end.
+**Net: all 10 files collect cleanly, 164/164 tests pass.**
 
 ---
 
@@ -859,8 +823,7 @@ Not covered even after the fixes: `m2_content_dedup` cross-version ID stability,
 
 - **Author:** P1 (gather, hierarchy), P3 (cleanup, sentences, content dedup), P4 (BibTeX dedup, export, schemas)
 - **Reviewer:** P1 ↔ P3, P2 ↔ P4
-- **Design decision:** Dedup identity for references is `(title, authors, year)` rather than a hash of the whole entry, because versions legitimately drop and add fields (the statement's own `vaswani2017` → `vit_transformer` example).
+- **Design decision:** Dedup identity for references uses title/DOI/key matching without excluding differing years, because versions legitimately update publication years (e.g., `vaswani2017` → `vit_transformer`).
 - **Design decision:** Elements are deduplicated **after** cleanup so that spacing and formatting differences do not prevent a match, as the statement requires.
-- **Design decision (new):** `run_m2` was collapsed from three scripts into one with `--steps bib,tree,content`. Good for reproducibility; bad for debuggability while `tree` is broken — hence the `--steps` escape hatch.
-- **Open question:** Should `tree` failures be downgraded from a hard exception to a recorded `entry["error"]`? The current `except Exception` already does this per paper, but the `ModuleNotFoundError` happens on `import`, i.e. before the loop, so no paper is even attempted.
-- **Open question:** Should `--export` be the default? Today a plain `python -m run_m2` leaves no Parquet and M3 has nothing to read.
+- **Design decision:** `run_m2` combines `bib`, `tree`, and `content` into one runner with `--steps` so stages can run together or independently for debugging.
+- **Open question:** Should `--export` be the default? Today a plain `python src/run_m2.py` leaves no Parquet until `--export` or `--export-only` is passed.

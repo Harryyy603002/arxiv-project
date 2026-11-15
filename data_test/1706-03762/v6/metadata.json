@@ -1,0 +1,34 @@
+{
+  "arxiv_id": "1706.03762v6",
+  "version": 6,
+  "date": "2023-07-24T00:48:54+00:00",
+  "title": "Attention Is All You Need",
+  "authors": [
+    "Ashish Vaswani",
+    "Noam Shazeer",
+    "Niki Parmar",
+    "Jakob Uszkoreit",
+    "Llion Jones",
+    "Aidan N. Gomez",
+    "Lukasz Kaiser",
+    "Illia Polosukhin"
+  ],
+  "venue": null,
+  "status": "ok",
+  "reason": "",
+  "files": [
+    "background.tex",
+    "introduction.tex",
+    "model_architecture.tex",
+    "ms.tex",
+    "parameter_attention.tex",
+    "results.tex",
+    "sqrt_d_trick.tex",
+    "training.tex",
+    "visualizations.tex",
+    "why_self_attention.tex"
+  ],
+  "archive_bytes": 1150981,
+  "bytes_before": 2425154,
+  "bytes_after": 79851
+}

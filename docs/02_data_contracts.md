@@ -693,7 +693,7 @@ Together these make `m2_stats.json` the largest per-paper file after
              "n_nodes_before_dedup": 2875, "n_elements_after_dedup": 2410},
    "version_status": {"v1": "ok", "v2": "ok"}},
   {"paper": "2602-04871", "arxiv_id": "2602.04871",
-   "error": "ModuleNotFoundError: No module named 'm2_macro_expansion'"}
+   "error": "ValueError: malformed metadata.json"}
 ]
 ```
 
@@ -748,22 +748,22 @@ they are the negative class.
 ### 4.2 `predictions`
 
 ```json
-[{"arxiv_id": "2310.12345", "citation_key": "vaswani2017attention",
+[{"arxiv_id": "2310.12345", "partition": "test",
+  "citation_key": "vaswani2017attention",
   "groundtruth_arxiv_id": "1706.03762",
-  "predicted_arxiv_ids": ["1706.03762", "1810.04805"]}]
+  "cand_1": "1706.03762", "cand_2": "1810.04805",
+  "cand_3": null, "cand_4": null, "cand_5": null}]
 ```
 
 | Column | Type | Notes |
 |---|---|---|
 | `arxiv_id` | string, non-null | citing paper |
+| `partition` | dictionary (`int32` → string), non-null | `train` / `valid` / `test` |
 | `citation_key` | string, non-null | |
 | `groundtruth_arxiv_id` | string, **nullable** | `null` when no match exists |
-| `predicted_arxiv_ids` | **list** of strings, non-null | ranked, best first |
+| `cand_1` … `cand_5` | string, **nullable** | top-5 ranked arXiv IDs, best first |
 
-> **Changed from the old doc.** `predictions` used to be documented as
-> `partition` + `cand_1`…`cand_5`. `PREDICTIONS_SCHEMA` has neither. It has a
-> **list** column and no `partition` column. If partitioning is required it is
-> a train-time concern, not a column.
+`PREDICTIONS_SCHEMA` matches the lab statement's nine-column flat format (`partition` + `cand_1`…`cand_5`). Only papers assigned to `train`, `valid`, or `test` are included.
 
 ---
 
@@ -800,8 +800,9 @@ From `src/utils/schemas.py`. `DICT_STRING = pa.dictionary(pa.int32(), pa.string(
 **`BIBTEX_SCHEMA`** — `arxiv_id`(F), `citation_key`(F), `entry_type`(T, dict),
 `title`(T), `authors`(T, list), `year`(int32, T), `doi`(T), `journal`(T), `url`(T)
 
-**`PREDICTIONS_SCHEMA`** — `arxiv_id`(F), `citation_key`(F),
-`groundtruth_arxiv_id`(T), `predicted_arxiv_ids`(list, F)
+**`PREDICTIONS_SCHEMA`** — `arxiv_id`(F), `partition`(F, dict),
+`citation_key`(F), `groundtruth_arxiv_id`(T),
+`cand_1`(T), `cand_2`(T), `cand_3`(T), `cand_4`(T), `cand_5`(T)
 
 > **`REFERENCES_SCHEMA.ref_arxiv_id` is `nullable=False`.** That is what forces
 > `collect_published_rows` to filter on `ref_arxiv_id` — an unfiltered row would
@@ -859,7 +860,7 @@ Root edges are dropped **before** check 4:
 | `m1_download.save_source` | **does not exist** | same |
 | `m2_export_parquet.py` | **deleted** | `run_m2 --export` → `utils.schemas.export_m2_parquet` |
 | `rewrite_citations` | **renamed** | `rewrite_citations_with_count` |
-| `predictions.partition`, `cand_1..5` | **never existed** | `predicted_arxiv_ids` list (§4.2) |
+| `predictions.predicted_arxiv_ids` | **replaced** | 9 flat columns `partition` + `cand_1`…`cand_5` (§4.2) |
 | "`utils.schemas.py` is still a stub" | **false** | fully implemented (§5) |
 
 `utils/config.py` still defines `meta_path()` and `versions_path()`. Only two
@@ -1019,7 +1020,7 @@ python src/utils/schemas.py
 python src/crawler/m1_tables.py --data-dir ./data
 
 # Export M2 tables and print integrity warnings
-python -m run_m2 --export-only --corpus-dir ./data
+python src/run_m2.py --export-only --corpus-dir ./data
 ```
 
 `python src/utils/schemas.py` builds a sample row for every schema, writes it,

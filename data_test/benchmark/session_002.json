@@ -1,0 +1,105 @@
+{
+  "milestone": "m1",
+  "total_wall_s": 31.15,
+  "stages_s": {
+    "discovery": 4.19,
+    "crawl": 26.75,
+    "tables": 0.1
+  },
+  "n_papers_timed": 2,
+  "avg_paper_s": 14.022,
+  "max_paper_s": 19.044,
+  "discovery_s": 4.19,
+  "n_ok": 2,
+  "n_failed": 0,
+  "success_rate": 1.0,
+  "ref_n_ok": 2,
+  "ref_n_failed": 0,
+  "ref_success_rate": 1.0,
+  "avg_refs_per_paper": 52.0,
+  "avg_arxiv_refs_per_paper": 32.5,
+  "n_papers_recorded": 2,
+  "n_tex_papers": 2,
+  "avg_paper_size_before_bytes": 8948768,
+  "avg_paper_size_after_bytes": 332875,
+  "n_tex_versions": 9,
+  "n_pdf_only_versions": 0,
+  "n_papers_with_pdf_only_version": 0,
+  "avg_version_size_before_bytes": 1988615,
+  "avg_version_size_after_bytes": 73972,
+  "peak_ram_mb": 107.3,
+  "avg_ram_mb": 104.3,
+  "ram_samples": 62,
+  "disk_baseline_mb": 0.0,
+  "peak_disk_mb": 1.6,
+  "final_output_mb": 1.0,
+  "final_output_bytes": 1090347,
+  "disk_estimated": false,
+  "session_index": 2,
+  "status": "completed",
+  "started_at_utc": "2026-11-15T12:41:04+00:00",
+  "updated_at_utc": "2026-11-15T12:41:35+00:00",
+  "environment": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python": "3.13.4",
+    "cpu_count": 12,
+    "ram_total_gb": 15.7,
+    "is_colab": false
+  },
+  "ids_file": "cli_args",
+  "n_ids": 2,
+  "batch_size": 25,
+  "resumed": false,
+  "new_versions_this_session": 9,
+  "coverage": {
+    "expected_versions": 9,
+    "crawled_versions": 9,
+    "failed_versions": 0,
+    "not_found_papers": 0,
+    "cached_versions": 0,
+    "cached_refs_papers": 0,
+    "discovery_cached_ids": 0,
+    "version_coverage": 1.0
+  },
+  "tables": {
+    "papers_rows": 2,
+    "total_local_references": 104,
+    "references_with_arxiv_id": 65,
+    "references_without_arxiv_id": 39,
+    "published_rows": 65,
+    "duplicate_rows": 0
+  },
+  "ended_at_utc": "2026-11-15T12:41:35+00:00",
+  "paper_times_s": {
+    "1706.03762": 19.044,
+    "1810.04805": 9.0
+  },
+  "paper_sizes_bytes": {
+    "1706.03762": {
+      "before": 16941491,
+      "after": 542088,
+      "tex_versions": 7
+    },
+    "1810.04805": {
+      "before": 956046,
+      "after": 123662,
+      "tex_versions": 2
+    }
+  },
+  "paper_results": {
+    "1706.03762": true,
+    "1810.04805": true
+  },
+  "paper_references": {
+    "1706.03762": {
+      "ok": true,
+      "total": 41,
+      "with_arxiv": 30
+    },
+    "1810.04805": {
+      "ok": true,
+      "total": 63,
+      "with_arxiv": 35
+    }
+  }
+}

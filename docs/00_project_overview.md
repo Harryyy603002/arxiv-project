@@ -65,20 +65,20 @@ Buddy review pairs: **P1 ↔ P3** and **P2 ↔ P4**.
 | M1 multi-session aggregation | ✅ Implemented (`m1_aggregate.py`) | `benchmark_m1_total.json` + `sessions.csv` |
 | M2 multi-file gather | ✅ Implemented (`m2_gather.py`) | 55 tests, all green |
 | M2 macro expansion + cleanup | ✅ Implemented (`m2_cleanup.py`) | `collect_macros`, `expand_user_macros`; **no** `m2_macro_expansion.py` exists |
-| M2 hierarchy builder | ⚠️ Implemented but **cannot import** (`m2_hierarchy.py:45`) | imports non-existent `m2_macro_expansion` |
+| M2 hierarchy builder | ✅ Implemented (`m2_hierarchy.py`) | calls `m2_cleanup.expand_user_macros`; 33 tests passing |
 | M2 BibTeX parser + dedup | ✅ Implemented (`m2_bibitem.py`, `m2_bib_dedup.py`) | `.bib` **and** inline `\bibitem` |
 | M2 content dedup | ✅ Implemented (`m2_content_dedup.py`) | aligned with `run_m2 --steps content` |
 | M2 Parquet export | ✅ Implemented (`utils/schemas.py::export_m2_parquet`) | `m2_export_parquet.py` was deleted; use `run_m2 --export` |
-| M2 integrated runner | ⚠️ Partial (`run_m2.py`) | 3 steps `bib,tree,content`; tree step broken — see [06 Integration](./06_integration.md) §4.1 |
-| M3 candidate generation | ✅ Implemented (`m3_candidates.py`) | 0 tests |
+| M2 integrated runner | ✅ Implemented (`run_m2.py`) | 3 steps `bib,tree,content` + `--export` all operational |
+| M3 candidate generation | ✅ Implemented (`m3_candidates.py`) | tested via `test_m2_parser.py` |
 | M3 auto-labeler | ⚠️ Skeleton (`raise NotImplementedError`) | |
 | M3 string/context features | ⚠️ Skeleton | |
 | M3 model + evaluation | ⚠️ Skeleton | |
-| M3 predictions + HF publish | ⚠️ Skeleton | `PREDICTIONS_SCHEMA` does not match the statement |
+| M3 predictions + HF publish | ⚠️ Skeleton | `PREDICTIONS_SCHEMA` updated to `partition` + `cand_1`…`cand_5` |
 | M3 pipeline runner | ⚠️ Skeleton (`run_m3.py`) | |
-| Test suite | ⚠️ **4 failed, 77 passed, 7 collection errors** | 3 of 10 test files execute; see [07 Testing](./07_testing_and_performance.md) §1 |
+| Test suite | ✅ **164 passed** | all 10 test files execute; see [07 Testing](./07_testing_and_performance.md) §1 |
 
-**Read the Note column.** A module being implemented does not mean the pipeline runs it, and a passing module does not mean the test that covers it can even import. `run_m2 --steps tree` currently raises `ModuleNotFoundError`. `run_m2 --steps bib,content` works.
+**Read the Note column.** Both M1 (`run_m1.py`) and M2 (`run_m2.py --steps bib,tree,content --export`) run end-to-end and all 164 unit tests pass. M3 remains skeleton stubs raising `NotImplementedError` aside from `m3_candidates.py` and `m3_pick_papers.py`.
 
 ---
 

@@ -23,7 +23,7 @@ Dự án xử lý dữ liệu quy mô lớn từ arXiv và Semantic Scholar, chi
 2. **Milestone 2 — LaTeX Parsing & Normalization (`src/run_m2.py`):**
    - **Step `bib`:** Trích xuất mục trích dẫn từ file `.bib` và môi trường `\bibitem` trong `.tex`, chuẩn hóa tiêu đề/tác giả, hợp nhất chéo version thành `bibtex_merged.json` và sinh bản đồ ánh xạ `cite_map.json`. Sinh chỉ mục ứng viên và `candidates.json` cho M3.
    - **Step `tree`:** Xác định file gốc tài liệu, mở rộng đệ quy `\input` và `\include`, mở rộng macro người dùng (`\newcommand`, `\def`), trích xuất cấu trúc phân cấp tài liệu (section, paragraph, itemize, equation, figure) thành `tree_raw.json`.
-   - **Step `content`:** Làm sạch văn bản LaTeX (loại bỏ comment, chuẩn hóa toán inline `MATH_` / block `EQ_`, bảo tồn lệnh `\cite{...}`), phân tách câu (`nltk.punkt`), cập nhật các khóa trích dẫn theo khóa chuẩn hóa trong `cite_map.json`, và khử trùng lặp nội dung chéo version thành `elements.json` và `hierarchy.json`.
+   - **Step `content`:** Làm sạch văn bản LaTeX (loại bỏ comment, chuẩn hóa toán inline `MATH_` / block `EQ_`, bảo tồn lệnh `\cite{...}`), phân tách câu (`m2_sentences.py`), cập nhật các khóa trích dẫn theo khóa chuẩn hóa trong `cite_map.json`, và khử trùng lặp nội dung chéo version thành `elements.json` và `hierarchy.json`.
    - **Export Parquet:** Xuất 3 bảng Parquet chuẩn hóa `elements.parquet`, `hierarchy.parquet`, và `bibtex.parquet` vào thư mục `<corpus>/export/`.
 
 3. **Milestone 3 — Citation Matching (`src/run_m3.py`):**
@@ -63,7 +63,6 @@ arxiv-project/
 │   ├── run_m1.py                     # Điểm chạy chính M1 (crawl + tables + bench)
 │   ├── run_m2.py                     # Điểm chạy chính M2 (bib + tree + content + export)
 │   ├── run_m3.py                     # Điểm chạy chính M3 (matching + evaluation)
-│   ├── requirements.txt              # Danh sách thư viện Python cần thiết
 │   ├── crawler/                      # Pipeline Milestone 1
 │   │   ├── m1_download.py            # Tải archive arXiv, trích .tex/.bib
 │   │   ├── m1_references.py          # Batch API Semantic Scholar, chuẩn hóa ref
@@ -74,23 +73,29 @@ arxiv-project/
 │   │   ├── m2_bibitem.py             # Trích xuất bibitem từ file .tex
 │   │   ├── m2_bib_dedup.py           # Phân tích BibTeX & gộp chéo version
 │   │   ├── m2_hierarchy.py           # Xây dựng cây phân cấp document (tree_raw.json)
-│   │   ├── m2_cleanup.py             # Khử macro, chuẩn hóa toán, làm sạch text
-│   │   ├── m2_sentences.py           # Tách câu (NLTK) & đổi tên khóa trích dẫn
-│   │   └── m2_content_dedup.py       # Khử trùng lặp nội dung chéo version
+│   │   ├── m2_cleanup.py             # Khử macro (Tầng 1), chuẩn hóa toán & làm sạch text (Tầng 2)
+│   │   ├── m2_sentences.py           # Tách câu theo quy tắc/regex
+│   │   ├── m2_content_dedup.py       # Khử trùng lặp nội dung & đổi khóa \cite
+│   │   ├── m2_inspect.py             # Xem nhanh kết quả parse M2 từng bài
+│   │   └── m2_pick_papers.py         # Lọc bài đủ điều kiện gán nhãn M3
 │   ├── matching/                     # Pipeline Milestone 3
 │   │   ├── m3_candidates.py          # Tạo cặp ứng viên BibTeX - Reference
+│   │   ├── m3_pick_papers.py         # Lọc bài đủ điều kiện gán nhãn M3
 │   │   ├── m3_string_features.py     # Đặc trưng so khớp chuỗi
 │   │   ├── m3_context_features.py    # Đặc trưng ngữ cảnh từ câu trích dẫn
 │   │   ├── m3_auto_labeler.py        # Tự động sinh nhãn
 │   │   ├── m3_model.py               # Huấn luyện mô hình xếp hạng
+│   │   ├── m3_predictions.py         # Xuất bảng predictions
 │   │   ├── m3_evaluate.py            # Đánh giá độ đo MRR@5
 │   │   └── m3_publish_hf.py          # Đóng gói và đẩy dataset lên Hugging Face
 │   ├── utils/                        # Tiện ích chung & cấu hình
 │   │   ├── config.py                 # Đường dẫn chuẩn, hằng số, biến môi trường
+│   │   ├── logger.py                 # Chuẩn hóa định dạng log pipeline
 │   │   ├── schemas.py                # Schema PyArrow 6 bảng & export Parquet
 │   │   └── benchmark.py              # PerfRecorder đo RAM, đĩa, thời gian
-│   └── tests/                        # Bộ kiểm thử tự động (162 tests)
-└── pytest.ini
+│   └── tests/                        # Bộ kiểm thử tự động (164 tests)
+├── pytest.ini
+└── requirements.txt                  # Danh sách thư viện Python cần thiết
 ```
 
 ---
@@ -112,7 +117,7 @@ python -m venv .venv
 # Windows (PowerShell): .venv\Scripts\Activate.ps1
 # Linux / macOS:        source .venv/bin/activate
 
-pip install -r src/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 3.2 Cấu hình biến môi trường
@@ -149,7 +154,7 @@ os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")  # Lưu trong mục Secret
 # 3. Clone repo và cài dependencies
 !git clone https://github.com/Harryyy603002/arxiv-project.git
 %cd arxiv-project
-!pip install -q -r src/requirements.txt
+!pip install -q -r requirements.txt
 ```
 
 ---
@@ -374,7 +379,7 @@ python src/run_m2.py --skip-existing
 
 1. **`bib` (P2):** Quét toàn bộ file `.bib` và khối `\begin{thebibliography}` / `\bibitem` trong tất cả file `.tex`. Chuẩn hóa tiêu đề, tác giả, năm; gộp các mục trùng giữa các version; sinh `cite_map.json` ánh xạ các citation key cũ về canonical key; sinh `candidates.json` cho M3.
 2. **`tree` (P1):** Tìm file TeX chính (`\documentclass`), phân giải đệ quy `\input` và `\include`, mở rộng macro người dùng (`m2_cleanup.expand_user_macros`), xây dựng cây cấu trúc phân cấp tài liệu lưu vào `tree_raw.json`.
-3. **`content` (P3):** Duyệt cây cấu trúc, làm sạch văn bản (loại bỏ comment TeX, thay toán inline bằng token `MATH_...`, toán khối bằng `EQ_...`), tách câu bằng NLTK, đổi tên các lệnh `\cite{...}` theo `cite_map.json`, khử trùng lặp nội dung chéo version và ghi ra `elements.json` cùng `hierarchy.json`.
+3. **`content` (P3):** Duyệt cây cấu trúc, làm sạch văn bản (loại bỏ comment TeX, chuẩn hóa toán inline `$...$` và toán khối `\begin{equation}...\end{equation}`), tách câu (`m2_sentences.py`), đổi tên các lệnh `\cite{...}` theo `cite_map.json`, khử trùng lặp nội dung chéo version và ghi ra `elements.json` cùng `hierarchy.json`.
 4. **`export` (P4):** Kiểm tra tính toàn vẹn dữ liệu (`validate_m2_integrity`) và xuất 3 bảng Parquet vào `<corpus>/export/`:
    - `elements.parquet`: `element_id, arxiv_id, kind, content`
    - `hierarchy.parquet`: `arxiv_id, version, element_id, parent_id` (nút gốc có `parent_id` rỗng được lược bỏ theo đúng đặc tả)
@@ -400,7 +405,7 @@ python src/run_m2.py --skip-existing
 
 ## 7. Kiểm thử & Đảm bảo chất lượng (QA)
 
-Dự án sở hữu bộ kiểm thử tự động toàn diện với **162 tests** được tổ chức khoa học trong `src/tests/`.
+Dự án sở hữu bộ kiểm thử tự động toàn diện với **164 tests** (10 file) được tổ chức khoa học trong `src/tests/`.
 
 ```bash
 # Chạy toàn bộ test suite từ thư mục gốc:
@@ -410,7 +415,7 @@ pytest src/tests -q
 pytest src/tests/test_run_m1_downloader.py src/tests/test_m1_references.py src/tests/test_m1_metadata.py -v
 
 # Chạy kiểm thử riêng cho M2:
-pytest src/tests/test_m2_pipeline.py src/tests/test_m2_hierarchy.py src/tests/test_m2_cleanup.py src/tests/test_m2_export_parquet.py -v
+pytest src/tests/test_m2_pipeline.py src/tests/test_m2_hierarchy.py src/tests/test_m2_text.py src/tests/test_m2_bibliography.py src/tests/test_m2_export_parquet.py -v
 ```
 
 Mọi bài test đều tự động cô lập thư mục dữ liệu qua `tmp_path`, đảm bảo không làm bẩn hoặc thay đổi dữ liệu thật trong `data/`.

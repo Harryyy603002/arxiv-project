@@ -238,3 +238,32 @@ def test_cli_default_out_dir_is_data_export(tmp_path, monkeypatch):
     run_m2.main(["--export-only"])
 
     assert (tmp_path / "data" / "export" / "elements.parquet").exists()
+
+
+def test_predictions_schema_roundtrips_partition_and_five_candidates(tmp_path):
+    df = pd.DataFrame([
+        {
+            "arxiv_id": "1706.03762",
+            "partition": "test",
+            "citation_key": "bahdanau2014",
+            "groundtruth_arxiv_id": "1409.0473",
+            "cand_1": "1409.0473",
+            "cand_2": "1508.04025",
+        },
+        {
+            "arxiv_id": "1706.03762",
+            "partition": "train",
+            "citation_key": "unmatched",
+            "groundtruth_arxiv_id": None,
+        },
+    ])
+    out = tmp_path / "predictions.parquet"
+    table = S.write_parquet(df, "predictions", out)
+    assert table.schema.equals(S.PREDICTIONS_SCHEMA)
+    assert table.schema.names == [
+        "arxiv_id", "partition", "citation_key", "groundtruth_arxiv_id",
+        "cand_1", "cand_2", "cand_3", "cand_4", "cand_5",
+    ]
+    loaded = pq.read_table(out)
+    assert loaded.to_pydict()["partition"] == ["test", "train"]
+    assert loaded.to_pydict()["cand_3"] == [None, None]

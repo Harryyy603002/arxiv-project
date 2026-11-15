@@ -1,0 +1,40 @@
+{
+  "arxiv_id": "1810.04805v2",
+  "version": 2,
+  "date": "2019-05-24T20:37:26+00:00",
+  "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+  "authors": [
+    "Jacob Devlin",
+    "Ming-Wei Chang",
+    "Kenton Lee",
+    "Kristina Toutanova"
+  ],
+  "venue": null,
+  "status": "ok",
+  "reason": "",
+  "files": [
+    "ablation.tex",
+    "abstract.tex",
+    "appendix_main.tex",
+    "bert.tex",
+    "bert_details.tex",
+    "conclusion.tex",
+    "direction_ablation_tab.tex",
+    "experiment.tex",
+    "experiments_details.tex",
+    "glue_official_tab.tex",
+    "intro.tex",
+    "main.tex",
+    "mask_procedure_ablation_tab.tex",
+    "more_ablation.tex",
+    "pretrained_embeddings_tab.tex",
+    "related.tex",
+    "size_ablation_tab.tex",
+    "squad_tab.tex",
+    "steps_ablation_fig.tex",
+    "swag_official_tab.tex"
+  ],
+  "archive_bytes": 316748,
+  "bytes_before": 552453,
+  "bytes_after": 67626
+}

@@ -8,6 +8,7 @@ Biến môi trường (tùy chọn): ARXIV_DATA_DIR, S2_API_KEY, CONTACT_EMAIL.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import sys

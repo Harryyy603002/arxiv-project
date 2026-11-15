@@ -516,42 +516,15 @@ budget for it when planning Colab disk, and mention it in the size table.
 full corpus without an API key this is hours of waiting and a near-guaranteed
 breaker trip. Use `--ids`-style targeting instead where possible.
 
-### 7.8 Four M1/M2 tests now fail (**new**)
+### 7.8 Previously broken M1/M2 tests and missing macro module (Fixed)
 
-`test_run_m1_downloader.py` (4 tests) fails against the rewritten `run_m1.py`:
+Earlier commits broke 7 test files (imports after refactoring) and failed on a
+missing `m2_macro_expansion` import in `m2_hierarchy.py:45`. All of these have
+since been resolved: `m2_hierarchy.py:45` imports `expand_user_macros` from
+`m2_cleanup`, `CHANGELOG_M1_M2.md` is aligned with `m2_cleanup.py`, and all 164
+tests across 10 files pass. See [07 Testing and Performance](07_testing_and_performance.md) §1.
 
-| Test | Failure |
-|---|---|
-| `test_run_m1_uses_canonical_downloader_and_checkpoints_versions` | asserts a call signature `crawl_batch` no longer takes |
-| `test_crawl_batch_overlaps_reference_and_source_work` | uses a `threading.Event` handshake the new batch loop does not tick |
-| `test_standalone_process_writes_atomic_stats_checkpoint` | `monkeypatch.setattr(m1_download, "version_dir", ...)` — `version_dir` no longer exists in that module |
-
-Plus `test_m2_text.py::test_clean_figure_keeps_structure_drops_placement`, which
-expects `\caption{A plot.}` and a preserved `\includegraphics` option, but the new
-`clean_figure` strips `\label` and mangles `width=\linewidth` into `width= `.
-
-Details and the full broken-test inventory are in
-[07 Testing and Performance](07_testing_and_performance.md) §1.4.
-
-### 7.9 The collaborator changelog describes files that do not exist
-
-`docs/CHANGELOG_M1_M2.md` §2.2 documents a two-layer LaTeX architecture whose
-Tầng 1 module is `src/parser/m2_macro_expansion.py`, and §2.3 documents
-`src/parser/export_unknown_commands.py`. **Neither file exists in any branch** —
-`git log --all` has no record of them.
-
-`m2_hierarchy.py` line 446 calls `ME.preprocess_version_text(full_text)`, where
-`ME` is that missing module, so **`m2_hierarchy` cannot be imported at all**:
-
-```
-ModuleNotFoundError: No module named 'm2_macro_expansion'
-```
-
-The macro-expansion logic itself does exist — `m2_cleanup.collect_macros()` and
-`m2_cleanup.expand_user_macros()` — so the fix is to repoint the import rather
-than write a new module. See [04 M2 Parsing](04_m2_parsing.md) §7.1.
-
-### 7.10 The `unknown_commands` counter never resets between runs
+### 7.9 The `unknown_commands` counter never resets between runs
 
 `m2_cleanup.unknown_commands` is a module-level `Counter()`. `run_m2` writes it to
 `benchmark/unknown_commands.json` at the end of each run but never calls

@@ -11,30 +11,17 @@
 ### 1.1 Running the suite
 
 ```powershell
-cd C:\Users\truon\Projects\arxiv-project
 python -m pytest src/tests -q --no-header
 ```
 
-If you run that default command right now, **it crashes at collection with 7 errors and exits with code 2 without running most tests.**
-
-To run every test that actually collects despite those errors, pass `--continue-on-collection-errors`:
-
-```powershell
-python -m pytest src/tests -q --no-header --continue-on-collection-errors
-```
-
-**Empirical result (commit `01b5bb0`):**
+**Verified result:**
 
 ```text
-4 failed, 77 passed, 7 errors in ~5s
+164 passed in ~2.9s
 ```
 
-- **134 raw `def test_` functions** exist across 10 test files.
-- **81 test cases collect** (from only 3 files: `test_m2_gather`, `test_m2_text`, `test_run_m1_downloader`).
-- **77 pass.**
-- **4 fail at runtime.**
-- **7 test files fail at import/collection.**
-- **M3 has 0 tests.**
+- **164 test items** collect and pass across **all 10 test files** in `src/tests/`.
+- M3 modules beyond `m3_candidates` remain skeletons (`NotImplementedError`).
 
 ### 1.2 Configuration
 
@@ -49,76 +36,29 @@ This single line puts `src/` on `sys.path`. Tests can do `from utils import conf
 
 ### 1.3 Per-File Test Inventory and Status
 
-| Test File | `def test_` | Collected | Pass | Fail | Collection Error | Root Cause |
-|---|---|---|---|---|---|---|
-| `test_m1_metadata.py` | 4 | 0 | 0 | 0 | 🔴 `ModuleNotFoundError: No module named 'm1_metadata'` | Collaborator deleted `src/crawler/m1_metadata.py` (logic moved to `run_m1.py::discover` and `m1_tables.py`) |
-| `test_m1_references.py` | 10 | 0 | 0 | 0 | 🔴 `ImportError: cannot import name 'crawl_references' from 'run_m1'` | Function was renamed to `crawl_batch` in `run_m1.py` |
-| `test_run_m1_downloader.py` | 4 | 4 | 1 | 3 | 🟢 (collects) | 3 runtime failures: `cached_refs_papers` key missing in test dict; `wait(timeout=1)` race in fake thread test; call to deleted `m1_download.version_dir` |
-| `test_m2_gather.py` | 40 | 55 | 55 | 0 | 🟢 (collects) | Fully healthy (55 collected due to `@pytest.mark.parametrize`) |
-| `test_m2_hierarchy.py` | 33 | 0 | 0 | 0 | 🔴 `ModuleNotFoundError: No module named 'm2_macro_expansion'` | `m2_hierarchy.py:45` imports a file that was never committed (logic lives in `m2_cleanup.py`) |
-| `test_m2_text.py` | 10 | 22 | 21 | 1 | 🟢 (collects) | 1 runtime failure: `test_clean_figure_keeps_structure_drops_placement` asserts `width=\linewidth` but `m2_cleanup.py` strips `\linewidth` as a dimension |
-| `test_m2_bibliography.py` | 4 | 0 | 0 | 0 | 🔴 `ModuleNotFoundError: No module named 'm2_macro_expansion'` | Imports `run_m2` which imports `m2_hierarchy` which fails |
-| `test_m2_parser.py` | 5 | 0 | 0 | 0 | 🔴 `ImportError: cannot import name 'rewrite_citations' from 'parser.m2_bib_dedup'` | Function was renamed to `rewrite_citations_with_count` |
-| `test_m2_pipeline.py` | 7 | 0 | 0 | 0 | 🔴 `ModuleNotFoundError: No module named 'm2_macro_expansion'` | Imports `m2_hierarchy` which fails |
-| `test_m2_export_parquet.py` | 17 | 0 | 0 | 0 | 🔴 `ImportError: cannot import name 'm2_export_parquet' from 'parser'` | Collaborator deleted `src/parser/m2_export_parquet.py` (exporter now lives in `src/utils/schemas.py::export_m2_parquet`) |
-| **Total** | **134** | **81** | **77** | **4** | **7 files broken** | **Only 3 files currently execute** |
+| Test File | Collected | Pass | Fail | Status | Coverage Summary |
+|---|---|---|---|---|---|
+| `test_m1_metadata.py` | 5 | 5 | 0 | 🟢 Pass | `run_m1` ID/range/version helpers and `paper_key` alignment |
+| `test_m1_references.py` | 11 | 11 | 0 | 🟢 Pass | S2 batch crawling, deduplication, and `REFERENCES_SCHEMA` |
+| `test_run_m1_downloader.py` | 4 | 4 | 0 | 🟢 Pass | `save_source_with_stats`, concurrent ref+source crawl, atomic checkpoint |
+| `test_m2_gather.py` | 55 | 55 | 0 | 🟢 Pass | Root `.tex` detection, include traversal, comment stripping |
+| `test_m2_hierarchy.py` | 33 | 33 | 0 | 🟢 Pass | `m2_hierarchy` tree construction, macro expansion, math/figure/list leaves |
+| `test_m2_text.py` | 22 | 22 | 0 | 🟢 Pass | `clean_text`, `clean_figure`, math normalization, `split_sentences`, content dedup |
+| `test_m2_bibliography.py` | 4 | 4 | 0 | 🟢 Pass | `\bibitem`, `deduplicate_keys`, `rewrite_citations_with_count`, `run_m2.run` |
+| `test_m2_parser.py` | 5 | 5 | 0 | 🟢 Pass | BibTeX provenance, `cite_map`, `m3_candidates` normalization & generation |
+| `test_m2_pipeline.py` | 7 | 7 | 0 | 🟢 Pass | End-to-end M1-layout → M2 Parquet pipeline |
+| `test_m2_export_parquet.py` | 18 | 18 | 0 | 🟢 Pass | Parquet roundtrips (incl. 9-column `PREDICTIONS_SCHEMA`), integrity, CLI |
+| **Total** | **164** | **164** | **0** | **🟢 10/10 files passing** | |
 
 ---
 
-## 2. Detailed Root-Cause Breakdown of Failures
+## 2. Historical Root-Cause Fixes (Resolved)
 
-### 2.1 The 7 Collection Errors
+Previously (at commit `01b5bb0`), 7 test files failed at collection (`m2_hierarchy` importing a missing `m2_macro_expansion` module, plus stale test imports for deleted/renamed M1 & M2 helpers) and 4 runtime assertions failed (`test_clean_figure_keeps_structure_drops_placement` and mock fixtures in `test_run_m1_downloader.py`). All of those have been fixed:
 
-1. **`src/tests/test_m1_metadata.py`**
-   - Line 11: `import m1_metadata as M`
-   - **Why it broke:** `src/crawler/m1_metadata.py` was removed in PR #18. Entry ID parsing and discovery are now in `src/run_m1.py::discover` and `read_ids`; table generation is in `src/crawler/m1_tables.py::build_papers`.
-   - **Fix:** Update imports to `from run_m1 import parse_entry_id, discover` and `from crawler import m1_tables`.
-
-2. **`src/tests/test_m1_references.py`**
-   - Line 12: `from run_m1 import crawl_references`
-   - **Why it broke:** `run_m1.py` refactored the crawler into `crawl_batch(group, info, rec, corpus, session, coverage, force_refs=False)`.
-   - **Fix:** Update test to call `crawl_batch` or test `crawler.m1_references.fetch_batch_group` directly.
-
-3. **`src/tests/test_m2_hierarchy.py`**
-   - Line 18: `import m2_hierarchy as H` → `src/parser/m2_hierarchy.py:45` does `import m2_macro_expansion as ME`
-   - **Why it broke:** `m2_macro_expansion.py` was never committed to git. Macro expansion logic was implemented directly inside `src/parser/m2_cleanup.py` (`collect_macros` and `expand_user_macros`).
-   - **Fix:** In `src/parser/m2_hierarchy.py:45`, remove `import m2_macro_expansion as ME` and use `from parser.m2_cleanup import expand_user_macros`.
-
-4. **`src/tests/test_m2_bibliography.py`**
-   - Line 61: `import run_m2` → imports `parser.m2_hierarchy` → fails on `m2_macro_expansion`.
-   - **Fix:** Resolved automatically once `m2_hierarchy.py` import is fixed.
-
-5. **`src/tests/test_m2_pipeline.py`**
-   - Line 29: `import m2_hierarchy as H` → fails on `m2_macro_expansion`.
-   - **Fix:** Resolved automatically once `m2_hierarchy.py` import is fixed.
-
-6. **`src/tests/test_m2_parser.py`**
-   - Line 3: `from parser.m2_bib_dedup import rewrite_citations`
-   - **Why it broke:** In `src/parser/m2_bib_dedup.py`, the function was renamed to `rewrite_citations_with_count(text, replacements)` returning `(new_text, count)`.
-   - **Fix:** Update test import to `from parser.m2_bib_dedup import rewrite_citations_with_count`.
-
-7. **`src/tests/test_m2_export_parquet.py`**
-   - Line 9: `from parser import m2_export_parquet as E`
-   - **Why it broke:** `src/parser/m2_export_parquet.py` was deleted in PR #19. Parquet export logic is now in `src/utils/schemas.py` (`export_m2_parquet`, `validate_m2_parquet_integrity`, `to_arrow_table`, `write_parquet`).
-   - **Fix:** Update test import to `from utils import schemas as E`.
-
-### 2.2 The 4 Runtime Failures
-
-1. **`test_m2_text.py::test_clean_figure_keeps_structure_drops_placement`**
-   - **Failure:** AssertionError: expected `\includegraphics[width=\linewidth]{a.png}`, got `\includegraphics[width= ]{a.png}`.
-   - **Cause:** In `m2_cleanup.py`, `_DIM_RE` regex strips LaTeX dimensions (`\linewidth`, `\textwidth`, `\columnwidth`, `0.5\textwidth`). The test expects `\linewidth` to remain inside `\includegraphics` bracket options.
-
-2. **`test_run_m1_downloader.py::test_run_m1_uses_canonical_downloader_and_checkpoints_versions`**
-   - **Failure:** `KeyError: 'cached_refs_papers'` at `src/run_m1.py:429`.
-   - **Cause:** `run_m1.crawl_batch` expects `coverage` dict to include the key `"cached_refs_papers"`, but the test's mock `coverage` dict only provided 4 keys (`expected_versions`, `crawled_versions`, `failed_versions`, `not_found_papers`).
-
-3. **`test_run_m1_downloader.py::test_crawl_batch_overlaps_reference_and_source_work`**
-   - **Failure:** `assert False` at `src/tests/test_run_m1_downloader.py:130` (`source_started.wait(timeout=1)` timed out).
-   - **Cause:** Thread timing race condition in the unit test mock under Windows.
-
-4. **`test_run_m1_downloader.py::test_standalone_process_writes_atomic_stats_checkpoint`**
-   - **Failure:** `AttributeError: module 'crawler.m1_download' has no attribute 'version_dir'`.
-   - **Cause:** In `m1_download.py`, `version_dir` was deleted. `m1_download` now takes an explicit `out_dir: Path` in `save_source_with_stats`. `version_dir` only lives in `utils.config.version_dir`.
+1. `src/parser/m2_hierarchy.py:45` now imports `expand_user_macros` from `m2_cleanup`.
+2. `test_m1_metadata.py`, `test_m1_references.py`, `test_m2_parser.py`, `test_m2_export_parquet.py`, `test_run_m1_downloader.py`, and `m2_cleanup.clean_figure` were all updated and pass.
+3. End-to-end `run_m2.run` and `m3_candidates` generation now have direct unit test coverage (`test_m2_bibliography.py`, `test_m2_parser.py`, `test_m2_pipeline.py`).
 
 ---
 
@@ -130,7 +70,7 @@ This single line puts `src/` on `sys.path`. Tests can do `from utils import conf
 | **M1 References** (`m1_references.py`) | Circuit breaker cooldown | `BREAKER_THRESHOLD=3`, `COOLDOWN_SECONDS=300` path never executed in tests | Simulate 3 consecutive 429 errors and verify 300s sleep / exception behavior |
 | **M1 Table Generation** (`m1_tables.py`) | `build_papers()` and `build_references()` | Table building from corpus files has no unit test | Run `build_papers()` on a mock `data/` and validate Parquet schema against `PAPERS_SCHEMA` |
 | **M1 Multi-Session Aggregator** (`m1_aggregate.py`) | `aggregate()` across multiple `session_*.json` | Aggregation logic, weighted average RAM, and `sessions.csv` export are completely untested | Create 2 mock session JSONs and assert `benchmark_m1_total.json` sums wall times and takes max RAM |
-| **M2 Integrated Pipeline** (`run_m2.py`) | Execution of `--steps bib,tree,content` end-to-end | `test_m2_bibliography` tests part of bib, but end-to-end runner is blocked by `m2_macro_expansion` import | Test with 1 sample paper once macro import is fixed |
+| **M2 Integrated Pipeline** (`run_m2.py`) | Full `--steps bib,tree,content` end-to-end | Verified in `test_m2_bibliography.py` (`test_run_m2_end_to_end`) and `test_m2_pipeline.py` | Add failure-path tests (missing root `.tex`, corrupt JSON) |
 | **M2 Content Deduplication** (`m2_content_dedup.py`) | Cross-version sentence and element deduplication | Tested partially in `test_m2_text.py`, but integration with `elements.json` schema is unverified | Add test verifying `elements.json` contains `node_id`, `type`, `raw_text`, and cross-version mappings |
 | **M3 Matching & Candidates** (`matching/`) | All candidate generation and feature extraction | **Zero unit tests in the entire codebase.** `m3_candidates.py` is called once indirectly from `test_m2_parser.py` | Add `src/tests/test_m3_candidates.py` verifying candidate generation, similarity threshold (0.35), and author normalization |
 | **Benchmark Utilities** (`benchmark.py`) | `ResourceMonitor` and `PerfRecorder` | Thread safety, RSS tree calculation, archive byte accounting, and summary serialization have zero direct tests | Add tests for `inspect_archive_bytes` on tar/gz/pdf, `record_paper_size`, and `summary()` |
@@ -296,8 +236,7 @@ python src/utils/benchmark.py --milestone m2 --watch data/corpus -- python src/r
 
 ## 7. Reading Guide for Students
 
-- **To run unit tests:** Use `python -m pytest src/tests -q --no-header --continue-on-collection-errors` until imports are fixed.
-- **To see why 7 test files fail:** Read §2.1.
+- **To run unit tests:** Use `python -m pytest src/tests -q --no-header`.
 - **To understand what the lab report requires:** Read §4.1 and §4.2.
 - **To understand RAM and Disk measurement:** Read §4.3.
 - **To explain Colab multi-session numbers in your report:** Read §5.1 and §5.2.
@@ -308,12 +247,8 @@ python src/utils/benchmark.py --milestone m2 --watch data/corpus -- python src/r
 ## 8. Team Review & Sign-Off
 
 - **Authors:** P4 (benchmark and schemas lead) & P1 (crawler and test lead)
-- **Review Status:** Re-verified against repository commit `01b5bb0`.
-- **Action Items for Team:**
-  1. Fix `src/parser/m2_hierarchy.py:45` by replacing `import m2_macro_expansion as ME` with `from parser.m2_cleanup import expand_user_macros`.
-  2. Fix `src/tests/test_m1_metadata.py` imports (`m1_metadata` → `run_m1` / `m1_tables`).
-  3. Fix `src/tests/test_m1_references.py` (`crawl_references` → `crawl_batch`).
-  4. Fix `src/tests/test_m2_export_parquet.py` (`parser.m2_export_parquet` → `utils.schemas`).
-  5. Fix `src/tests/test_m2_parser.py` (`rewrite_citations` → `rewrite_citations_with_count`).
-  6. Add unit tests for `src/matching/m3_candidates.py` and `src/utils/benchmark.py`.
+- **Review Status:** Verified (`164 passed` across all 10 test files).
+- **Remaining Action Items for Team:**
+  1. Add unit tests for `src/utils/benchmark.py`, `src/crawler/m1_tables.py`, and `src/crawler/m1_aggregate.py`.
+  2. Add tests for M3 modules as they move from skeleton to implementation (`m3_auto_labeler.py`, `m3_model.py`, `m3_evaluate.py`).
 

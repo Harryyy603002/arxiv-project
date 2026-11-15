@@ -1,0 +1,25 @@
+{
+  "arxiv_id": "1706.03762",
+  "title": "Attention Is All You Need",
+  "authors": [
+    "Ashish Vaswani",
+    "Noam Shazeer",
+    "Niki Parmar",
+    "Jakob Uszkoreit",
+    "Llion Jones",
+    "Aidan N. Gomez",
+    "Lukasz Kaiser",
+    "Illia Polosukhin"
+  ],
+  "submission_date": "2017-06-12T17:57:34+00:00",
+  "revised_dates": [
+    "2017-06-19T16:49:45+00:00",
+    "2017-06-20T05:20:02+00:00",
+    "2017-06-30T17:29:30+00:00",
+    "2017-12-06T03:30:32+00:00",
+    "2023-07-24T00:48:54+00:00",
+    "2023-08-02T00:41:18+00:00"
+  ],
+  "venue": null,
+  "n_versions": 7
+}

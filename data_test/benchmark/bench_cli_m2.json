@@ -1,0 +1,25 @@
+{
+  "milestone": "m2",
+  "total_wall_s": 1.45,
+  "stages_s": {},
+  "n_papers_timed": 0,
+  "avg_paper_s": null,
+  "max_paper_s": null,
+  "peak_ram_mb": 85.6,
+  "avg_ram_mb": 39.5,
+  "ram_samples": 4,
+  "disk_baseline_mb": 2.6,
+  "peak_disk_mb": 2.6,
+  "final_output_mb": 2.5,
+  "final_output_bytes": 2673477,
+  "disk_estimated": false,
+  "returncode": 0,
+  "command": [
+    "python",
+    "src/run_m2.py",
+    "--corpus-dir",
+    "./data_test",
+    "--ids",
+    "1706.03762"
+  ]
+}

@@ -1,0 +1,532 @@
+{
+  "DBLP:journals/corr/BritzGLL17": {
+    "candidate_count": 15,
+    "candidate_ids": [
+      "dcce8a5294c74dc6",
+      "4b49465d838aa2d7",
+      "9eff8b07e772470c",
+      "e4f9d497efa9e647",
+      "69760bb2bb102fc3",
+      "197b75a25013445c",
+      "21c62bc98307b591",
+      "072a270bbcf46a23",
+      "ff638cf38e6fa673",
+      "c2907d5f13d2b14c",
+      "83f354cc7ee86fb3",
+      "8fdbc2117cacfb78",
+      "19a6c38c07a2f5d8",
+      "07112094ad3ea7e0",
+      "1607f1db5a383d58"
+    ]
+  },
+  "DBLP:journals/corr/SzegedyVISW15": {
+    "candidate_count": 9,
+    "candidate_ids": [
+      "d19cf4dee1ee1a61",
+      "b824a5314de8d6c7",
+      "2c2904b28b36889e",
+      "a0f77e2fd0dc4631",
+      "cc7365d47612b623",
+      "c925c4ce6c46ce91",
+      "5676bac312800b2e",
+      "a7c647d67784b7cc",
+      "596782d7eeecb4f5"
+    ]
+  },
+  "DBLP:journals/corr/ZhouCWLX16": {
+    "candidate_count": 12,
+    "candidate_ids": [
+      "c4746b86e68371fa",
+      "735e69d23a6f0872",
+      "a6db74997126e559",
+      "769f0a2bac4aa5c6",
+      "c6fd1b4d48d1aac7",
+      "9989c674d984d9b0",
+      "a3f08f2b9791c279",
+      "796bd76b8ea68915",
+      "12f987fe03cfa28b",
+      "589f826d423de285",
+      "21ec05bfe998de19",
+      "5dd5cd1890f2036d"
+    ]
+  },
+  "JonasFaceNet2017": {
+    "candidate_count": 7,
+    "candidate_ids": [
+      "00bcb429bf1931ee",
+      "f4b726c3ef6ae477",
+      "8dfbd7a71f32e04b",
+      "72c27ab75c26959c",
+      "73982f46120926cf",
+      "95baba1f0ac01615",
+      "7f177ed276023152"
+    ]
+  },
+  "KVparse15": {
+    "candidate_count": 4,
+    "candidate_ids": [
+      "1119c10b84467d78",
+      "e654385f19dd8f26",
+      "f1ff2fe873f19788",
+      "452fcd6458ff2dbd"
+    ]
+  },
+  "Kuchaiev2017Factorization": {
+    "candidate_count": 9,
+    "candidate_ids": [
+      "a46fc2eca2867cc5",
+      "0bd72c2351f1536d",
+      "13010588f028ab12",
+      "eaeaa0ebdfa1b4be",
+      "f2dcfcaf3d92b525",
+      "bab2d06c71922313",
+      "5000c648e9ed0e15",
+      "343499c3ac99689c",
+      "83ad569eabcd426d"
+    ]
+  },
+  "NalBytenet2017": {
+    "candidate_count": 12,
+    "candidate_ids": [
+      "3a41010ab0ed4f83",
+      "c89347fb1a177c07",
+      "52855989e8207913",
+      "b1047c840f8f8b39",
+      "235edfb8f1066cfd",
+      "7adfbc460abcee10",
+      "c6716bbb33ca5f9d",
+      "d7701483dd6f3e0f",
+      "ca42fdd7b533f3c4",
+      "19b084d43486172d",
+      "20954a40e1e70b52",
+      "dfb32e080d150091"
+    ]
+  },
+  "bahdanau2014neural": {
+    "candidate_count": 11,
+    "candidate_ids": [
+      "fd3c5388f6f73b3f",
+      "583ce0c3951823ce",
+      "89c7d4e9709aad7b",
+      "6e0ba92689835ec4",
+      "8a96acb06bd2c58a",
+      "95b158b24ed4c7dc",
+      "d1025720ca0cd539",
+      "b4690478f917efe3",
+      "802a72372c57e45c",
+      "b3cd00d0be7e684b",
+      "01ec2ec169a29c8d"
+    ]
+  },
+  "cheng2016long": {
+    "candidate_count": 8,
+    "candidate_ids": [
+      "269f083e3956c169",
+      "fe227833346b81c1",
+      "adb481df26db12d0",
+      "b230966cf5f376b6",
+      "f8ab4cbd3e8954bd",
+      "98921602706c62da",
+      "e22fbb60b143003a",
+      "e62eed558ce891b1"
+    ]
+  },
+  "cho2014learning": {
+    "candidate_count": 9,
+    "candidate_ids": [
+      "bf2625e39309f1c5",
+      "987a2a2d2643c367",
+      "133c2bc8c05463b0",
+      "a63c4d8b42d112c4",
+      "c57016deed626fb8",
+      "1b2193d88f854a9d",
+      "9c1c828b112ef12f",
+      "7bf70deea60e71ed",
+      "4c6e0eb3ad7704bc"
+    ]
+  },
+  "decomposableAttnModel": {
+    "candidate_count": 7,
+    "candidate_ids": [
+      "eda2074bd6725b94",
+      "99baf7fc517c1814",
+      "d0c6b65ebe242285",
+      "1b0649cdaa04c8ae",
+      "47b44bd77a570a67",
+      "23c98a56bead836e",
+      "c881ee8b1f73c7a6"
+    ]
+  },
+  "dyer-rnng:16": {
+    "candidate_count": 13,
+    "candidate_ids": [
+      "3cc0038ce74d3011",
+      "04b2d31df516f370",
+      "1fe379a5603004fd",
+      "20b206c76eaeb87a",
+      "d7b445446896f705",
+      "7b2581db41144083",
+      "c83958732b3f28c9",
+      "6b2625cff285d8f0",
+      "c257e8ff8afc41bd",
+      "b347d38a2230f808",
+      "4330220d0d909cba",
+      "3aafd8542f88ad09",
+      "dc580b773616d4f8"
+    ]
+  },
+  "extendedngpu": {
+    "candidate_count": 9,
+    "candidate_ids": [
+      "0faed41b5b5baaf6",
+      "081ea7ee8e22e7d7",
+      "df09472005f75967",
+      "a4fc8626aade8e40",
+      "d5bf58b1fcdf0667",
+      "7ca33c152a603320",
+      "20734c5acfcdd42a",
+      "515c9bb0b0032b67",
+      "593ecdba40d98802"
+    ]
+  },
+  "graves2013generating": {
+    "candidate_count": 15,
+    "candidate_ids": [
+      "857b819d9ac050e2",
+      "16503c4127ae0275",
+      "016fc8c6875c7159",
+      "a6eb7ff6d65eef47",
+      "8bb5f825aafa79b8",
+      "88dc9245f90f4695",
+      "6f4c0095d8cbb067",
+      "2b5b6dbb5bb8b804",
+      "60a3aa48c97d978a",
+      "b366139aa6b90a1d",
+      "b5fd6a5f28322ddb",
+      "b1da42174a4c66f8",
+      "31d53098a274c6bb",
+      "097ddd97c054e8f5",
+      "1e0f64b3809b19df"
+    ]
+  },
+  "gruEval14": {
+    "candidate_count": 12,
+    "candidate_ids": [
+      "f2392c3cdbb59a57",
+      "010ce6c8fbe25b6b",
+      "23d23bf887a6270d",
+      "ea1a78c65c58385c",
+      "878e706fd7ceab8f",
+      "6d9910334066aa77",
+      "903f5efde9a286f0",
+      "cb271efed17835d0",
+      "ec8334cdcf9820b8",
+      "d96dafa63a4b8dcd",
+      "34975acd4a4214fe",
+      "1be2ea180571f71b"
+    ]
+  },
+  "he2016deep": {
+    "candidate_count": 12,
+    "candidate_ids": [
+      "34f06e3e1ed2b12e",
+      "b3a69d12a16adfad",
+      "77b233e6ea878017",
+      "986c08771d72d564",
+      "0f4675705d88d29a",
+      "b1d0c6881f1be813",
+      "883100ad99d7cc6f",
+      "711072e7186f4e3e",
+      "742560f35e5828c4",
+      "bdbe2bc4bac9606a",
+      "0904b94cabeab58a",
+      "754f69efdef3f272"
+    ]
+  },
+  "hochreiter1997": {
+    "candidate_count": 3,
+    "candidate_ids": [
+      "b021ab335d80548e",
+      "c8b816af65d4b5da",
+      "50d11e38e4c6e614"
+    ]
+  },
+  "hochreiter2001gradient": {
+    "candidate_count": 0,
+    "candidate_ids": []
+  },
+  "huang-harper:2009:EMNLP": {
+    "candidate_count": 6,
+    "candidate_ids": [
+      "976b0921d0d7be83",
+      "6d3095dee7a98b4f",
+      "3c81af33027240ce",
+      "8065790616ef9029",
+      "deef3d53f8cf9be8",
+      "415c67cef125d4fc"
+    ]
+  },
+  "jozefowicz2016exploring": {
+    "candidate_count": 8,
+    "candidate_ids": [
+      "e4c8b842377f51d6",
+      "b4ee3240f9fa00be",
+      "a3f67c244e73268d",
+      "a2d81c74d9fbd36f",
+      "ca6104cd21b1cc6f",
+      "c9684313172ba929",
+      "de79414fd1085248",
+      "ac9a6130225ed194"
+    ]
+  },
+  "kingma2014adam": {
+    "candidate_count": 6,
+    "candidate_ids": [
+      "61d1630cfadc5775",
+      "809d04d9128024d8",
+      "dee3d61c527ff112",
+      "19bc05d03304df86",
+      "939bcbd56253a882",
+      "9713b5d25a792296"
+    ]
+  },
+  "layernorm2016": {
+    "candidate_count": 4,
+    "candidate_ids": [
+      "dc77d30e380203de",
+      "5ff6db81d887f914",
+      "66eaf74a4a2d2be3",
+      "42be589370d7386a"
+    ]
+  },
+  "lin2017structured": {
+    "candidate_count": 4,
+    "candidate_ids": [
+      "0bd6d4aa0e7d3904",
+      "354ed733c65ea418",
+      "de6ca8cf5ab74ef3",
+      "21bb442dc756c02d"
+    ]
+  },
+  "luong2015effective": {
+    "candidate_count": 14,
+    "candidate_ids": [
+      "fa6ed84bd055d020",
+      "4e2d2c94c7748f1a",
+      "7d4dfe8bbfee901b",
+      "61671985979ce3b2",
+      "40e76a809d7f367f",
+      "c0af249982b33fef",
+      "3ad509103987946b",
+      "f21cbbba5216f5cf",
+      "af37d81309122d00",
+      "94e8b8289eb869ee",
+      "f0e5f5795f223aad",
+      "0fd802a7f10a8624",
+      "abf899e260d16935",
+      "ef38aea51cde4cbf"
+    ]
+  },
+  "marcus1993building": {
+    "candidate_count": 2,
+    "candidate_ids": [
+      "d89f3f72b5635bba",
+      "6005c41d3fca57da"
+    ]
+  },
+  "mcclosky-etAl:2006:NAACL": {
+    "candidate_count": 10,
+    "candidate_ids": [
+      "f7420390f8d28a57",
+      "ec632cd3a0c6b856",
+      "c96ba32e6cf6b56e",
+      "fb721bdba07b9a20",
+      "d491f7f398ef9ee9",
+      "8c7a03253abfb670",
+      "df17fb2f80f8d140",
+      "3ac5f693d5ad9e8d",
+      "78bdbd716b9f8c8f",
+      "e0bd4de640d9061e"
+    ]
+  },
+  "multiseq2seq": {
+    "candidate_count": 6,
+    "candidate_ids": [
+      "982218b8f2dbf88c",
+      "c9fc0033ab2f637f",
+      "b62c8feed8f35684",
+      "052427c57506c943",
+      "aa76e84190508b4b",
+      "e048665e0dafb542"
+    ]
+  },
+  "neural_gpu": {
+    "candidate_count": 8,
+    "candidate_ids": [
+      "3a7db7e91e4e754b",
+      "901470c3cb983891",
+      "8d650e452b48b5fa",
+      "d7f327cca17d3eee",
+      "ab298c3c954b0680",
+      "76581abd486b14f5",
+      "d68f875bad3ca32d",
+      "fd2bda9ad88896cf"
+    ]
+  },
+  "paulus2017deep": {
+    "candidate_count": 10,
+    "candidate_ids": [
+      "af1d8a61f9b2b939",
+      "9a84710349eb281e",
+      "4ebe3591a31b3bde",
+      "c44a173d56126df0",
+      "8ba7eb017ffd1b1a",
+      "5d19ebdf751218c8",
+      "d8da4db0f5df326e",
+      "65159aa196439b38",
+      "c9e2495dec339944",
+      "2ee4726e2f5ceaf0"
+    ]
+  },
+  "petrov-EtAl:2006:ACL": {
+    "candidate_count": 9,
+    "candidate_ids": [
+      "a59da68ec1bea151",
+      "09d3c190ac425a55",
+      "7abfc174e87ffa78",
+      "6683e4be69941258",
+      "26fb79a4d2d7b92a",
+      "d6ad89ca9c5027bd",
+      "1f04988cfab3f1cc",
+      "c233001f81fae698",
+      "381e9225de316b4f"
+    ]
+  },
+  "press2016using": {
+    "candidate_count": 3,
+    "candidate_ids": [
+      "13b4dd168ff2afd2",
+      "bd8f7000304198ba",
+      "cc9f0b5b4eeecc8c"
+    ]
+  },
+  "sennrich2015neural": {
+    "candidate_count": 11,
+    "candidate_ids": [
+      "2f0be1e84ac7c7de",
+      "ac218f9ccf0b9a32",
+      "b3b808280e722eec",
+      "0a31aebcd6b35cd7",
+      "e39dd878480137b1",
+      "5c7bcac745309e18",
+      "9380b2c204f70492",
+      "edc32f29b8196b61",
+      "453722c6002378f6",
+      "0631ef8e3ddf97ce",
+      "cace69b14c3ce5d9"
+    ]
+  },
+  "shazeer2017outrageously": {
+    "candidate_count": 7,
+    "candidate_ids": [
+      "fb2d8efc665d561f",
+      "602388524ca77cb3",
+      "f7d244ef2ec7ac48",
+      "86dcfd4a7623d181",
+      "bf285aaee60a57fe",
+      "8ed7ea14729ec200",
+      "410aad5772df5996"
+    ]
+  },
+  "srivastava2014dropout": {
+    "candidate_count": 10,
+    "candidate_ids": [
+      "63f4e0cd3b2bff39",
+      "8826e733b3aa9769",
+      "bf9763d14163153d",
+      "b5081c3c121c6891",
+      "7b7e144fe781a1f4",
+      "81ae661465f07c43",
+      "1592d1a9b50d2d1a",
+      "24d162196a734b85",
+      "50f208f1ddb67dff",
+      "024598fe3791839f"
+    ]
+  },
+  "structuredAttentionNetworks": {
+    "candidate_count": 8,
+    "candidate_ids": [
+      "410334a5906f97e1",
+      "9bf4192abbd25808",
+      "b4e8ec920108eccc",
+      "4c23568676e683a0",
+      "9f648b9b83beb56d",
+      "d3e260ec2c253528",
+      "2b74d9bb636c89d5",
+      "4ce044e8983198cc"
+    ]
+  },
+  "sukhbaatar2015": {
+    "candidate_count": 7,
+    "candidate_ids": [
+      "d33ad8772f66f5e9",
+      "556d84bf94aa6c68",
+      "9ac96a2d196f779b",
+      "3f15dfc31c58cb05",
+      "5fb11d9a146df34d",
+      "fce82cd11a22f51a",
+      "ea44793741f7cb7c"
+    ]
+  },
+  "sutskever14": {
+    "candidate_count": 11,
+    "candidate_ids": [
+      "175fec3ce3e64f12",
+      "b8dce335de3b7d9c",
+      "70922d431f2ecb35",
+      "7a92d53a24bbe616",
+      "00a7010ea8ba7c9b",
+      "e0ddb7b017098957",
+      "ab30e4378575ae43",
+      "c5ae4d04fb47afcd",
+      "f0b19972e698e0b8",
+      "6f80158f8f2a242f",
+      "bdc18efd3f2a1a83"
+    ]
+  },
+  "wu2016google": {
+    "candidate_count": 7,
+    "candidate_ids": [
+      "094ccd38490979b0",
+      "5ed606174928b850",
+      "dea05206dc338ee1",
+      "9c0d058495610b0b",
+      "84b77e8c26fe26d1",
+      "14ff32279bd21e71",
+      "e73f8013a95ce08f"
+    ]
+  },
+  "xception2016": {
+    "candidate_count": 8,
+    "candidate_ids": [
+      "41835129157dd1a8",
+      "916901748ec8d029",
+      "adb29bf960364bb5",
+      "18b5d4f103fc0de1",
+      "7af7296b1a1c1a04",
+      "8404319f3fa9e67f",
+      "89024cc4c2d8ea55",
+      "0f532b5602b3328e"
+    ]
+  },
+  "zhu-EtAl:2013:ACL": {
+    "candidate_count": 5,
+    "candidate_ids": [
+      "e6be4f3594d49565",
+      "e1b1803cb5d9359c",
+      "8cbdc6a78df52441",
+      "0eba0f050b64b24a",
+      "118c7c29b09bb6a0"
+    ]
+  }
+}

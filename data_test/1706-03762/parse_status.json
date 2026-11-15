@@ -1,0 +1,37 @@
+{
+ "arxiv_id": "1706.03762",
+ "versions": {
+  "v1": {
+   "status": "ok",
+   "n_nodes": 231
+  },
+  "v2": {
+   "status": "ok",
+   "n_nodes": 253
+  },
+  "v3": {
+   "status": "ok",
+   "n_nodes": 253
+  },
+  "v4": {
+   "status": "ok",
+   "n_nodes": 238
+  },
+  "v5": {
+   "status": "ok",
+   "n_nodes": 231
+  },
+  "v6": {
+   "status": "ok",
+   "n_nodes": 232
+  },
+  "v7": {
+   "status": "ok",
+   "n_nodes": 232
+  }
+ },
+ "n_versions": 7,
+ "n_versions_ok": 7,
+ "n_nodes_before_dedup": 1670,
+ "n_elements_after_dedup": 317
+}

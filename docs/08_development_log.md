@@ -8,7 +8,7 @@
 
 ## 1. Timeline and Major Milestones
 
-`main` is currently at commit `01b5bb0` (86 commits). Milestone work has proceeded through several distinct phases:
+Milestone work has proceeded through several distinct phases:
 
 | Date | Phase | What Landed | Key Commits / PRs |
 |---|---|---|---|
@@ -18,17 +18,18 @@
 | **29/10–04/11**| M1 Hardening | Non-blocking Drive scan, 429 backoff, batch reference crawl, thread overlap | PR #9, `865abf9`, `cd07e42` |
 | **05/11** | Consolidation | Raw reference provenance, published CSV export, BibTeX merge, hierarchy tree | `97c5ebc`, `5cac703`, PR #13 |
 | **08–10/11**| M2 Parquet & Merge | Parquet export schemas, text cleaning merge, docs baseline | PR #15, PR #16, `cf5750d` |
-| **Current** | Collaborator Rework (PR #18 & #19) | Complete restructuring of M1 and M2 pipelines, Colab multi-session logging, 3-step M2 runner (`bib,tree,content`), two-layer LaTeX cleaning | `0498368` (PR #18: `m1_aggregate`, `m1_tables`), `01b5bb0` (PR #19: `run_m2`, `m2_inspect`, `README_M2`, `CHANGELOG_M1_M2`) |
+| **01b5bb0** | Collaborator Rework (PR #18 & #19) | Complete restructuring of M1 and M2 pipelines, Colab multi-session logging, 3-step M2 runner (`bib,tree,content`), two-layer LaTeX cleaning | `0498368` (PR #18: `m1_aggregate`, `m1_tables`), `01b5bb0` (PR #19: `run_m2`, `m2_inspect`, `README_M2`, `CHANGELOG_M1_M2`) |
+| **Current** | Stabilization & Docs Sync | Fixed `m2_hierarchy` import (`m2_cleanup.expand_user_macros`), modernized all 10 test files (164/164 pass), consolidated root `requirements.txt`, updated `PREDICTIONS_SCHEMA` to 9 columns (`partition` + `cand_1`..`cand_5`), synced `README*` and `docs/00`–`08` | Local working tree |
 
 ---
 
-## 2. Milestone Status (Reality as of Commit `01b5bb0`)
+## 2. Milestone Status (Current Reality)
 
-| Milestone | Code State | Test Suite Status | What Still Needs Fixing |
+| Milestone | Code State | Test Suite Status | What Still Needs Work |
 |---|---|---|---|
-| **M1** | Functionally complete with multi-session Colab logging, parallel reference crawling, and Parquet table generation (`m1_tables.py`). | 1 pass, 3 fail (`test_run_m1_downloader.py`). `test_m1_metadata` and `test_m1_references` fail at import. | Update test imports to match refactored functions; fix mock coverage dictionary in downloader test. |
-| **M2** | Three-step pipeline (`bib`, `tree`, `content`) implemented in `run_m2.py`. Rich text cleaning in `m2_cleanup.py`. Parquet export integrated into `utils/schemas.py`. | 76 pass, 1 fail (`test_m2_text.py`). 5 test files fail at import due to missing `m2_macro_expansion` and renamed functions. | Fix `m2_hierarchy.py:45` import (`m2_macro_expansion` → `m2_cleanup.expand_user_macros`); update test imports. |
-| **M3** | Candidate generation implemented in `src/matching/m3_candidates.py`. Remaining 7 modules are skeleton stubs raising `NotImplementedError`. | **0 tests**. | Labeling, feature extraction, ranking models, and MRR@5 evaluation. |
+| **M1** | Functionally complete with multi-session Colab logging, parallel reference crawling, and Parquet table generation (`m1_tables.py`). | 20/20 pass (`test_m1_metadata`, `test_m1_references`, `test_run_m1_downloader`). | Full-corpus Colab crawl & report benchmark aggregation. |
+| **M2** | Three-step pipeline (`bib`, `tree`, `content`) + Parquet export implemented and operational in `run_m2.py`. Rich two-layer LaTeX cleaning in `m2_cleanup.py`. | 144/144 pass across all 7 M2 test files (incl. `test_m2_parser` covering `m3_candidates`). | Reset `unknown_commands` per `run_m2.run()` call; full-corpus run & benchmark. |
+| **M3** | Candidate generation (`m3_candidates.py`), paper picker (`m3_pick_papers.py`), and 9-column `PREDICTIONS_SCHEMA` (`schemas.py`) ready. Remaining 7 modules are skeleton stubs raising `NotImplementedError`. | Candidate generation + `PREDICTIONS_SCHEMA` covered in `test_m2_parser.py` & `test_m2_export_parquet.py`. | Labeling, feature extraction, ranking models, `m3_predictions`, `m3_publish_hf`, MRR@5 evaluation. |
 
 ---
 
@@ -60,28 +61,22 @@ In `run_m1.py`, arXiv downloading is strictly serial to comply with rate limits.
 
 | # | Subsystem | Issue / Bug | Impact | Fix Location |
 |---|---|---|---|---|
-| 1 | **M2 Hierarchy** | `m2_hierarchy.py:45` imports non-existent `m2_macro_expansion` | Breaks `run_m2.py --steps tree` and crashes 3 test files during collection | In `src/parser/m2_hierarchy.py`, replace `import m2_macro_expansion as ME` with `from parser.m2_cleanup import expand_user_macros` |
-| 2 | **Test Suite** | 7 test files fail during pytest collection | Blocks standard `pytest` run | Update imports in `test_m1_metadata.py`, `test_m1_references.py`, `test_m2_export_parquet.py`, `test_m2_parser.py`, and fix `m2_macro_expansion` |
-| 3 | **M1 Coverage Mock** | `test_run_m1_downloader.py` misses `cached_refs_papers` key | Causes `KeyError` in test | Add `'cached_refs_papers': 0` to the test fixture dictionary |
-| 4 | **Figure Cleaning Test** | `test_clean_figure_keeps_structure_drops_placement` fails | `m2_cleanup.py` strips `\linewidth` as a dimension | Adjust regex in `m2_cleanup.py` to preserve dimension tokens inside `\includegraphics` bracket options |
-| 5 | **M1 Corpus Redundancy** | `v{N}/references.json` duplicated per version | Wastes disk space across thousands of versions | Clarified in [02_data_contracts.md](./02_data_contracts.md); canonical location is `<paper>/refs.json` |
-| 6 | **M2 Counter Reset** | `unknown_commands` counter never cleared between runs | Counts accumulate if multiple `run_m2.run()` calls execute in the same process | Call `reset_unknown_commands()` at the start of `run_m2.run()` |
-| 7 | **M2 Duplicate Functions** | 4 bracket/argument helpers defined twice in `m2_cleanup.py` | Code bloat and maintenance risk | Deduplicate helper definitions in `src/parser/m2_cleanup.py` |
-| 8 | **M3 Predictions Schema** | `PREDICTIONS_SCHEMA` defines `predicted_arxiv_ids` as a list | Lab statement requires 5 separate columns: `cand_1`, `cand_2`, `cand_3`, `cand_4`, `cand_5` | Rewrite `PREDICTIONS_SCHEMA` in `src/utils/schemas.py` |
+| 1 | **M1 Corpus Redundancy** | `v{N}/references.json` duplicated per version | Wastes disk space across thousands of versions | Clarified in [02_data_contracts.md](./02_data_contracts.md); canonical location is `<paper>/refs.json` |
+| 2 | **M2 Counter Reset** | `unknown_commands` counter never cleared between runs | Counts accumulate if multiple `run_m2.run()` calls execute in the same process | Call `reset_unknown_commands()` at the start of `run_m2.run()` |
+| 3 | **M2 Duplicate Functions** | 4 bracket/argument helpers defined twice in `m2_cleanup.py` | Code bloat and maintenance risk | Deduplicate helper definitions in `src/parser/m2_cleanup.py` |
 
 ---
 
 ## 5. Team Decisions and Open Questions
 
-1. **Test Suite Modernization:** The test suite needs a surgical update to align test assertions and imports with the new M1/M2 codebases so `python -m pytest` passes 100% cleanly.
-2. **Macro Expansion Placement:** The changelog referred to `m2_macro_expansion.py`, but the functions were implemented in `m2_cleanup.py`. The team should decide whether to keep them in `m2_cleanup.py` or split them into a dedicated module.
-3. **M3 Implementation Strategy:** With M1 and M2 pipelines complete and stabilized, M3 feature extraction and ranking model development can begin using `elements.parquet`, `hierarchy.parquet`, `bibtex.parquet`, and `references.parquet`.
-4. **Jupyter Book Report Integration:** Performance numbers from `benchmark_m1_total.json` and `m2_benchmark.json` must be committed as tabular markdown into the report documentation.
+1. **Test Suite Modernization (Done):** All 10 test files now align with the current M1/M2 codebases and `PREDICTIONS_SCHEMA`, with `python -m pytest src/tests -q` passing 164/164 tests.
+2. **Macro Expansion Placement (Done):** Kept inside `m2_cleanup.py` (`collect_macros`, `expand_user_macros`), imported by `m2_hierarchy.py:45`, and documented consistently across `README.md`, `README_M2.md`, `docs/CHANGELOG_M1_M2.md`, and `docs/00`–`08`.
+3. **M3 Implementation Strategy:** With M1, M2, and `PREDICTIONS_SCHEMA` stabilized, M3 labeling, feature extraction, and ranking model development can build directly on `elements.parquet`, `hierarchy.parquet`, `bibtex.parquet`, `references.parquet`, and `candidates.json`.
+4. **Jupyter Book Report Integration:** Performance numbers from `benchmark_m1_total.json` and `m2_benchmark.json` must be recorded in the final report.
 
 ---
 
 ## 6. Review & Verification
 
-- **Current Repository HEAD:** `01b5bb0` (Merge PR #19)
-- **Empirical Test State:** `4 failed, 77 passed, 7 errors` (with `--continue-on-collection-errors`)
-- **Documentation Suite:** Fully refreshed and verified against the actual source code across all documents `00` through `08` and `README.md`.
+- **Empirical Test State:** `164 passed` (`python -m pytest src/tests -q`), plus verified end-to-end runs of `run_m1.py`, `run_m2.py --export`, `schemas.py`, `m1_tables.py`, and `m1_aggregate.py`.
+- **Documentation Suite:** Synced across `README.md`, `README_M2.md`, `docs/CHANGELOG_M1_M2.md`, `docs/README.md`, and `docs/00` through `docs/08`.
