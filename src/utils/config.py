@@ -8,10 +8,20 @@ Biến môi trường (tùy chọn): ARXIV_DATA_DIR, S2_API_KEY, CONTACT_EMAIL.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Dict, Iterator, Optional, Tuple
+
+# Đảm bảo stdout/stderr luôn dùng UTF-8 trên mọi nền tảng (đặc biệt Windows cp1252)
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, io.UnsupportedOperation):
+            pass
 
 # --- Tự động nạp biến môi trường từ file .env nếu có ---
 try:

@@ -42,8 +42,7 @@ from utils.config import paper_dir
 from utils.config import iter_id_range, parse_id_range, parse_month_last  # noqa: E402
 from utils import config as _cfg  # noqa: E402  (đọc DATA_DIR hiện hành, không bị cố định lúc import)
 import m2_gather as G
-import m2_macro_expansion as ME  # **Tầng 1**: bung macro và môi trường
-from m2_cleanup import expand_user_macros  # noqa: E402 - Giữ lại dự phòng (tương thích)
+from m2_cleanup import expand_user_macros  # noqa: E402 - Tầng 1: bung macro tự định nghĩa
 from m2_cleanup import normalize_block_math, split_segments  # noqa: E402
 
 # ----------------------------------------------------------------------------
@@ -442,8 +441,8 @@ def parse_version(vdir: Path, arxiv_id: str | None = None) -> dict:
         # Gộp file
         full_text = expand_includes(vdir, res.root)
         
-        # **Tầng 1**: Bung macro và môi trường tự định nghĩa (mới)
-        full_text = ME.preprocess_version_text(full_text)
+        # **Tầng 1**: Bung macro tự định nghĩa (m2_cleanup.expand_user_macros)
+        full_text = expand_user_macros(full_text)
         
         # Parse tree
         body = extract_body(full_text)

@@ -33,7 +33,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import arxiv
 import psutil
@@ -44,14 +44,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crawler import m1_aggregate, m1_download, m1_references, m1_tables  # noqa: E402
 from utils import config as C  # noqa: E402
 from utils.benchmark import PerfRecorder  # noqa: E402
+from utils.logger import setup_logger  # noqa: E402
 
 CACHE_NAME = "discovery_cache.json"
 
 VERSION_RE = re.compile(r"v(\d+)$")
 
+_LOGGER = setup_logger("m1")
 
-def log(msg: str) -> None:
-    print(msg, flush=True)
+def log(msg: str, level: str = "info") -> None:
+    getattr(_LOGGER, level.lower(), _LOGGER.info)(msg)
 
 
 def folder_name(arxiv_id: str) -> str:
@@ -83,12 +85,8 @@ def _parse_range(raw: str):
     return None
 
 
-def read_ids(path: Path, month_last: Optional[Dict[str, int]] = None) -> List[str]:
-    """Đọc danh sách ID. Mỗi dòng là MỘT ID hoặc MỘT KHOẢNG ID (xem _parse_range).
-
-    Chịu được BOM, CRLF, tiền tố arXiv:/URL, hậu tố vN. Khoảng đi qua nhiều tháng cần
-    month_last = {"2512": 25075} (ID cuối của các tháng giữa). Dòng không hợp lệ bị bỏ qua
-    và báo rõ số dòng."""
+def parse_ids_list(lines: Iterable[str], month_last: Optional[Dict[str, int]] = None) -> List[str]:
+    """Phân tích danh sách dòng/chuỗi ID hoặc khoảng ID (xem _parse_range)."""
     ids, seen = [], set()
 
     def add(aid: str) -> None:
@@ -96,8 +94,8 @@ def read_ids(path: Path, month_last: Optional[Dict[str, int]] = None) -> List[st
             seen.add(aid)
             ids.append(aid)
 
-    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
-        raw = line.strip()
+    for number, raw_line in enumerate(lines, start=1):
+        raw = raw_line.strip()
         if not raw or raw.startswith("#"):
             continue
         bounds = _parse_range(raw)
@@ -106,14 +104,22 @@ def read_ids(path: Path, month_last: Optional[Dict[str, int]] = None) -> List[st
                 for aid in C.iter_id_range(*bounds, month_last):
                     add(aid)
             except ValueError as error:
-                raise SystemExit(f"[ids] dòng {number} ({raw}): {error}")
+                raise SystemExit(f"[ids] mục {number} ({raw}): {error}")
             continue
         aid = C.normalize_arxiv_id(raw)
         if not aid or not (NEW_ID_RE.match(aid) or OLD_ID_RE.match(aid)):
-            log(f"[ids] BỎ QUA dòng {number}: {raw!r} không phải arXiv ID hợp lệ")
+            log(f"[ids] BỎ QUA mục {number}: {raw!r} không phải arXiv ID hợp lệ")
             continue
         add(aid)
     return ids
+
+def read_ids(path: Path, month_last: Optional[Dict[str, int]] = None) -> List[str]:
+    """Đọc danh sách ID. Mỗi dòng là MỘT ID hoặc MỘT KHOẢNG ID (xem _parse_range).
+
+    Chịu được BOM, CRLF, tiền tố arXiv:/URL, hậu tố vN. Khoảng đi qua nhiều tháng cần
+    month_last = {"2512": 25075} (ID cuối của các tháng giữa). Dòng không hợp lệ bị bỏ qua
+    và báo rõ số dòng."""
+    return parse_ids_list(path.read_text(encoding="utf-8-sig").splitlines(), month_last)
 
 
 def select_ids(ids: List[str], limit: Optional[int], sample: Optional[int]) -> List[str]:
@@ -532,8 +538,10 @@ def backup_benchmark(corpus: Path, backup_dir: Path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Milestone 1: crawl arXiv (mọi version) + reference Semantic Scholar + benchmark")
-    ap.add_argument("--ids-file", required=True, type=Path,
+    ap.add_argument("--ids-file", type=Path, default=None,
                     help="mỗi dòng một arXiv ID hoặc một khoảng ID (vd. 260204870-260209869)")
+    ap.add_argument("--ids", nargs="*", default=None,
+                    help="danh sách arXiv ID hoặc khoảng ID trực tiếp từ CLI (vd. 2606.20734-2606.25733)")
     ap.add_argument("--month-last", nargs="*", default=[], metavar="YYMM=N",
                     help="ID cuối của tháng, cho khoảng đi qua nhiều tháng (vd. 2512=25075)")
     ap.add_argument("--limit", type=int, default=None, help="chỉ lấy N ID đầu (chạy thử)")
@@ -564,7 +572,17 @@ def main() -> int:
     if not C.S2_API_KEY:
         log("CẢNH BÁO: chưa có S2_API_KEY, Semantic Scholar sẽ chậm và dễ bị 429.")
 
-    ids = select_ids(read_ids(args.ids_file, C.parse_month_last(args.month_last)), args.limit, args.sample)
+    if not args.ids_file and not args.ids:
+        ap.error("Cần truyền ít nhất một trong hai: --ids-file hoặc --ids")
+
+    month_last_map = C.parse_month_last(args.month_last)
+    raw_ids = []
+    if args.ids_file:
+        raw_ids.extend(read_ids(args.ids_file, month_last_map))
+    if args.ids:
+        raw_ids.extend(parse_ids_list(args.ids, month_last_map))
+
+    ids = select_ids(raw_ids, args.limit, args.sample)
     log(f"[ids] {len(ids)} ID sẽ được xử lý")
     session = requests.Session()
     session.headers.update({"User-Agent": args.user_agent})
@@ -588,7 +606,7 @@ def main() -> int:
             "started_at_utc": started_at,
             "updated_at_utc": _utcnow(),
             "environment": _environment(),
-            "ids_file": str(args.ids_file),
+            "ids_file": str(args.ids_file) if args.ids_file else "cli_args",
             "n_ids": len(ids),
             "batch_size": args.batch_size,
             "resumed": resumed,

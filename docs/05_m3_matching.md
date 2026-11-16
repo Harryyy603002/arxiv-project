@@ -116,7 +116,7 @@ The statement requires additional preprocessing before matching. `normalize_text
 - **Token-level similarity** (Jaccard, token-sort ratio) alongside `SequenceMatcher`, because word order differs between BibTeX and Semantic Scholar titles far more often than characters do.
 - **Year proximity** as a feature — a candidate whose `ref_submission_date` is far from the BibTeX `year` is unlikely.
 
-`rapidfuzz` is already in `src/requirements.txt` — use it for `token_sort_ratio` / `partial_ratio`, which are far faster than `SequenceMatcher` at corpus scale.
+`rapidfuzz` is already in `requirements.txt` — use it for `token_sort_ratio` / `partial_ratio`, which are far faster than `SequenceMatcher` at corpus scale.
 
 ### 4.2 Data Labeling (`m3_auto_labeler.py`)
 
@@ -223,26 +223,12 @@ Final MRR@5 = mean over all labeled test entries. The statement defines `|Q|` as
 | Column | Type |
 |--------|------|
 | `arxiv_id` | string, non-null |
-| `partition` | dictionary: `train` / `valid` / `test` |
+| `partition` | dictionary (`DICT_STRING`), non-null: `train` / `valid` / `test` |
 | `citation_key` | string, non-null |
 | `groundtruth_arxiv_id` | string, nullable |
 | `cand_1` … `cand_5` | string, nullable |
 
-> **Schema mismatch to fix:** `src/utils/schemas.py` currently defines `PREDICTIONS_SCHEMA` with a single `predicted_arxiv_ids` list column and no `partition` column. The statement requires five separate `cand_N` columns plus `partition`. Update `PREDICTIONS_SCHEMA` before final export:
->
-> ```python
-> PREDICTIONS_SCHEMA = pa.schema([
->     pa.field("arxiv_id", pa.string(), nullable=False),
->     pa.field("partition", DICT_STRING, nullable=True),
->     pa.field("citation_key", pa.string(), nullable=False),
->     pa.field("groundtruth_arxiv_id", pa.string(), nullable=True),
->     pa.field("cand_1", pa.string(), nullable=True),
->     pa.field("cand_2", pa.string(), nullable=True),
->     pa.field("cand_3", pa.string(), nullable=True),
->     pa.field("cand_4", pa.string(), nullable=True),
->     pa.field("cand_5", pa.string(), nullable=True),
-> ])
-> ```
+`PREDICTIONS_SCHEMA` in `src/utils/schemas.py` matches this nine-column layout (`write_parquet(df, "predictions", ...)` converts `partition` to dictionary encoding automatically).
 
 Only publications in train/valid/test get rows — publications outside the three sets must be excluded, per the statement.
 
@@ -262,7 +248,7 @@ Six sharded Parquet tables, each in its own subfolder, with a dataset card:
     └── predictions/
 ```
 
-`huggingface_hub` is already in `src/requirements.txt`. Minimal upload:
+`huggingface_hub` is already in `requirements.txt`. Minimal upload:
 
 ```python
 from huggingface_hub import HfApi

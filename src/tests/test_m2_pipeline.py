@@ -114,7 +114,6 @@ def _write_paper(arxiv_id: str, n_versions: int) -> None:
 @pytest.fixture()
 def corpus(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(H, "DATA_DIR", tmp_path)
     figure_png = b"\x89PNG" * 2000  # hình: M1 phải bỏ, M2 không thấy
     _write_paper("2602.04870", 2)
     _write_version("2602.04870", 1, _tar({"main.tex": MAIN_V1, "sections/method.tex": METHOD_V1,

@@ -17,13 +17,14 @@ Tài liệu này ghi lại toàn bộ thay đổi từ code M1/M2 ban đầu đ�
 - ✅ Debug tốt: log lỗi chi tiết + backup cache hỏng
 
 ### M2 (Parsing & Standardization)
-- ✅ Sửa run_m2.py: khắc phục 8+ lỗi nghiêm trọng
-- ✅ Chuyển \bibitem → BibTeX (đề bắt buộc)
-- ✅ Khử trùng BibTeX đúng theo đề
-- ✅ Kiến trúc hai tầng xử lý LaTeX:
-  - Tầng 1: Bung macro tác giả (\newcommand, \def...)
-  - Tầng 2: Bảo vệ, phân loại, bóc vỏ dự phòng + đếm
-- ✅ Test suite (21 tests, đều pass)
+- ✅ Sửa **run_m2.py** (viết lại): khắc phục 8+ lỗi nghiêm trọng
+- ✅ Thêm chuyển **\bibitem sang BibTeX** (đề bắt buộc)
+- ✅ **Khử trùng BibTeX** đúng theo ví dụ trong đề
+- ✅ **Kiến trúc hai tầng xử lý LaTeX** (nằm trong `src/parser/m2_cleanup.py`):
+  - **Tầng 1**: Bung macro tác giả (`collect_macros`, `expand_user_macros`)
+  - **Tầng 2**: Bảo vệ, phân loại, bóc vỏ dự phòng với bộ đếm `unknown_commands`
+- ✅ Làm sạch LaTeX tốt hơn nhiều
+- ✅ Bộ kiểm thử hoàn chỉnh (`165 tests` trên 10 file trong `src/tests/`, đều pass)
 
 ---
 
@@ -282,25 +283,24 @@ Kết quả:
 
 ### 2.2. Kiến trúc hai tầng xử lý LaTeX (MỚI)
 
-#### **Tầng 1: `m2_macro_expansion.py` (MỚI)**
+#### **Tầng 1: `collect_macros` & `expand_user_macros` (trong `m2_cleanup.py`)**
 
-Chạy **sau gather**, **trước dựng cây**, riêng từng version.
+Chạy **sau `expand_includes`**, **trước `extract_body`** trong `m2_hierarchy.py`, riêng cho từng version.
 
 **Chức năng:**
-- ✅ Thu thập: `\newcommand`, `\renewcommand`, `\providecommand`, `\DeclareRobustCommand`, `\def`, `\DeclareMathOperator`, `\newenvironment`, `\newtheorem`
-- ✅ Bung lặp (max 10 vòng, có giới hạn kích thước)
-- ✅ Không bung trong `\cite{}`, `\ref{}`, `\label{}`
-- ✅ Xóa dòng định nghĩa sau khi thu thập
-- ✅ Bỏ qua macro phức tạp (`\csname`, `\expandafter`, `\catcode`)
-- ✅ Xử lý điều kiện: bỏ `\iffalse...\fi` và `comment`
-- ✅ Bung môi trường tự định nghĩa
-- ✅ Viết tắt phổ biến: `\ie`, `\eg`, `\etal`, `\cf`, `\vs`, `\wrt`, `\etc`
+- ✅ Thu thập: `\newcommand`, `\renewcommand`, `\providecommand`, `\def` (macro có thân `{...}`)
+- ✅ Bung lặp (mặc định `max_rounds=4`, chặn phình văn bản theo `3 * len(text) + 20000`)
+- ✅ Xóa dòng định nghĩa macro sau khi thu thập
+- ✅ Bỏ qua macro phức tạp hoặc được bảo vệ (`\csname`, `_PROTECTED_MACROS`, macro 0 đối số chứa `#`)
+- ✅ Bung viết tắt phổ biến (`BUILTIN_ABBREVS`): `\ie`, `\eg`, `\etal`, `\cf`, `\vs`, `\wrt`, `\etc`
 
 **Tích hợp:**
 ```python
-# Trong m2_hierarchy.py
+# Trong src/parser/m2_hierarchy.py
+from m2_cleanup import expand_user_macros
+
 full_text = expand_includes(vdir, res.root)
-full_text = ME.preprocess_version_text(full_text)  # ← Tầng 1
+full_text = expand_user_macros(full_text)  # ← Tầng 1
 body = extract_body(full_text)
 ```
 
@@ -346,13 +346,13 @@ save_unknown_commands_stats("path/to/output.json")
 
 ### 2.3. Vòng lặp cải tiến
 
-Script mới: **`export_unknown_commands.py`**
+Bộ đếm được lưu tự động khi chạy `run_m2.py`, đọc lại bằng `m2_cleanup.load_unknown_commands_stats()` hoặc xem trực tiếp file JSON:
 
 **Quy trình:**
-1. Chạy M2 → tự động lưu `benchmark/unknown_commands.json`
-2. Phân tích: `python src/parser/export_unknown_commands.py --corpus-dir data_m2 --top 50`
-3. Xem top lệnh lạ, phân loại theo (text/dimension/complex/no_arg)
-4. Thêm vào bảng phù hợp trong `m2_cleanup.py`
+1. Chạy M2 → tự động lưu `<corpus>/benchmark/unknown_commands.json`
+2. Mở `<corpus>/benchmark/unknown_commands.json` (và chạy `python src/parser/m2_inspect.py --corpus-dir data_m2 --ids <ID>`) để xem các lệnh lạ xuất hiện nhiều nhất
+3. Phân loại theo (`text`/`dimension`/`complex`/`no_arg`)
+4. Thêm vào bảng phù hợp trong `src/parser/m2_cleanup.py`
 5. Chạy lại M2, so sánh kết quả
 
 ### 2.4. Files M2 khác
@@ -372,7 +372,7 @@ Script mới: **`export_unknown_commands.py`**
 #### **`m2_hierarchy.py`**
 - ✅ Đọc ID từ `paper.json`
 - ✅ Bỏ `\title`, `\author`, `\date`, `\thanks`, `\affiliation`
-- ✅ **Tích hợp Tầng 1** (gọi `preprocess_version_text`)
+- ✅ **Tích hợp Tầng 1** (gọi `expand_user_macros` từ `m2_cleanup`)
 - ✅ Mở rộng macro trước khi parse
 
 #### **`m2_content_dedup.py`**
@@ -389,11 +389,10 @@ Script mới: **`export_unknown_commands.py`**
 
 ### 2.5. Files mới
 
-1. ✅ **`m2_macro_expansion.py`**: Tầng 1
-2. ✅ **`export_unknown_commands.py`**: Phân tích lệnh lạ
-3. ✅ **`m2_inspect.py`**: Xem nhanh đầu ra
-4. ✅ **`matching/m3_pick_papers.py`**: Chọn bài gán nhãn M3
-5. ✅ **Test suite**: 21 tests (đều pass)
+1. ✅ **`m2_inspect.py`**: Xem nhanh đầu ra và kiểm tra lỗi sót lệnh LaTeX
+2. ✅ **`m2_pick_papers.py`**: Chọn bài đủ entry/ứng viên cho M3
+3. ✅ **`matching/m3_pick_papers.py`**: Chọn bài gán nhãn M3
+4. ✅ **Test suite (`src/tests/`)**: 10 file test, tổng 164 tests (đều pass)
 
 ### 2.6. Files đã xóa
 
@@ -499,7 +498,8 @@ The FooNet achieves E = mc^2 with and \cite{ref}.
 - ✅ Ví dụ `2601.00424`: 634 nút → 370 element (dedup 42%)
 - ✅ 264/368 element dùng chung giữa 2 version
 - ✅ 49 entry BibTeX đủ thông tin
-- ✅ 21 unit tests đều pass
+- ✅ Không có cạnh lỗi trong cây
+- ✅ 164 unit tests pass (10 file trong `src/tests/`)
 
 ### Kiến trúc hai tầng (M2)
 - ✅ Tầng 1: bung macro thành công
@@ -543,8 +543,8 @@ python src/run_m1.py --ids-file ID.txt --month-last 2512=25075 \
 # Chạy đầy đủ 3 bước
 python src/run_m2.py --corpus-dir data --export
 
-# Phân tích lệnh lạ
-python src/parser/export_unknown_commands.py --corpus-dir data --top 50
+# Kiểm tra nhanh đầu ra và lệnh lạ trên một bài
+python src/parser/m2_inspect.py --corpus-dir data --ids 1706.03762
 ```
 
 ### 5.4. Verify M1 completion
@@ -583,13 +583,37 @@ python scripts/verify_m1_completion.py --ids-file ID.txt --corpus-dir data
 
 ## 7. Tổng kết
 
+### M1
+1. ✅ Kiểm tra `--month-last` bằng arXiv API
+2. ⏳ Chạy full trên Colab (28-45 giờ, 3-4 phiên)
+3. ⏳ Báo cáo Jupyter Book (ghi rõ cách gộp log nhiều phiên)
+
+### M2
+1. ✅ Kiến trúc hai tầng hoàn chỉnh trong `m2_cleanup.py`
+2. ✅ Lưu thống kê lệnh lạ ra `benchmark/unknown_commands.json`
+3. ⏳ Chạy full trên Colab để benchmark
+4. ⏳ Báo cáo Jupyter Book
+
+### M3
+1. ✅ Đã cập nhật `PREDICTIONS_SCHEMA` (9 cột phẳng: `partition`, `cand_1`..`cand_5`)
+2. ⏳ Gán nhãn thủ công: 20 bài, 400 mục (theo đề)
+3. ⏳ Tập Test/Validation: mỗi tập 4 bài thủ công + 4 bài tự động
+
+### Khác
+1. ✅ Chạy lại toàn bộ test suite (`164 passed`)
+2. ✅ Đồng bộ các file `docs/00`–`docs/08` với code hiện tại
+
+---
+
+## 8. Tổng kết
+
 ### Files thêm mới
 1. `src/crawler/m1_tables.py`
 2. `src/crawler/m1_aggregate.py`
-3. `scripts/verify_m1_completion.py`
-4. `src/parser/m2_macro_expansion.py`
-5. `src/parser/export_unknown_commands.py`
-6. `src/tests/` (21 tests)
+3. `src/parser/m2_inspect.py`
+4. `src/parser/m2_pick_papers.py`
+5. `src/matching/m3_pick_papers.py`
+6. `src/tests/` (10 file, 165 tests)
 
 ### Files đã xóa
 1. `src/crawler/m1_metadata.py`

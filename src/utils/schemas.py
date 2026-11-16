@@ -81,9 +81,14 @@ BIBTEX_SCHEMA = pa.schema([
 # Milestone 3
 PREDICTIONS_SCHEMA = pa.schema([
     pa.field("arxiv_id", pa.string(), nullable=False),
+    pa.field("partition", DICT_STRING, nullable=False),
     pa.field("citation_key", pa.string(), nullable=False),
     pa.field("groundtruth_arxiv_id", pa.string(), nullable=True),
-    pa.field("predicted_arxiv_ids", pa.list_(pa.string()), nullable=False),
+    pa.field("cand_1", pa.string(), nullable=True),
+    pa.field("cand_2", pa.string(), nullable=True),
+    pa.field("cand_3", pa.string(), nullable=True),
+    pa.field("cand_4", pa.string(), nullable=True),
+    pa.field("cand_5", pa.string(), nullable=True),
 ])
 
 ALL_SCHEMAS: Dict[str, pa.Schema] = {
@@ -307,12 +312,37 @@ def main() -> None:
     ])
     errors = validate_m2_integrity(sample_elements, sample_hierarchy, sample_bibtex)
     assert not errors, f"Phát hiện lỗi toàn vẹn: {errors}"
+    sample_predictions = pd.DataFrame([
+        {
+            "arxiv_id": "1706.03762",
+            "partition": "test",
+            "citation_key": "bahdanau2014",
+            "groundtruth_arxiv_id": "1409.0473",
+            "cand_1": "1409.0473",
+            "cand_2": "1508.04025",
+            "cand_3": None,
+            "cand_4": None,
+            "cand_5": None,
+        },
+        {
+            "arxiv_id": "1706.03762",
+            "partition": "train",
+            "citation_key": "unmatched",
+            "groundtruth_arxiv_id": None,
+            "cand_1": None,
+            "cand_2": None,
+            "cand_3": None,
+            "cand_4": None,
+            "cand_5": None,
+        },
+    ])
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         for name, df in [
             ("elements", sample_elements),
             ("hierarchy", sample_hierarchy),
             ("bibtex", sample_bibtex),
+            ("predictions", sample_predictions),
         ]:
             out_file = tmp_dir / f"{name}.parquet"
             write_parquet(df, name, out_file)

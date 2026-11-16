@@ -15,22 +15,21 @@
 
 M2 đã được nâng cấp với kiến trúc hai tầng để xử lý tốt hơn các lệnh LaTeX lạ:
 
-### **Tầng 1: Bung Macro** (`m2_macro_expansion.py`)
-Chạy **sau khi gom file**, **trước khi dựng cây**, riêng cho từng version.
+### **Tầng 1: Bung Macro** (`m2_cleanup.expand_user_macros`)
+Chạy **sau khi gộp file** (`expand_includes`), **trước khi trích xuất thân tài liệu** trong `m2_hierarchy.py`, riêng cho từng version.
 
-**Chức năng:**
-- Thu thập và bung macro: `\newcommand`, `\renewcommand`, `\def`, `\DeclareMathOperator`
-- Bung môi trường: `\newenvironment`, `\newtheorem`
-- Xử lý điều kiện: bỏ `\iffalse...\fi` và môi trường `comment`
-- Viết tắt phổ biến: `\ie` → `i.e.`, `\eg` → `e.g.`, `\etal` → `et al.`
-- Bỏ qua macro phức tạp (`\csname`, `\expandafter`, `\catcode`)
+**Chức năng (`collect_macros` & `expand_user_macros` trong `m2_cleanup.py`):**
+- Thu thập và bung macro tự định nghĩa: `\newcommand`, `\renewcommand`, `\providecommand`, `\def` (có/không đối số, mặc định `max_rounds=4`)
+- Xóa các dòng định nghĩa macro sau khi thu thập
+- Bung viết tắt phổ biến (`BUILTIN_ABBREVS`): `\ie` → `i.e.`, `\eg` → `e.g.`, `\etal` → `et al.`, `\cf`, `\vs`, `\wrt`, `\etc`
+- Bỏ qua macro phức tạp hoặc được bảo vệ (`\csname`, macro trong `_PROTECTED_MACROS`, macro 0 đối số nhưng chứa `#`)
 
 ### **Tầng 2: Bảo vệ, Phân loại, Bóc vỏ** (`m2_cleanup.py`)
 Chạy trong `clean_text()` (bước content).
 
 **Quy trình:**
 1. **Bảo vệ:** toán inline, `\cite{}`, `\ref{}`, URL, verbatim
-2. **Phân loại theo bảng:** DROP (có/không đối số), UNWRAP, SPACE, KÝ HIỆU
+2. **Phân loại theo bảng:** `DROP_WITH_ARGS`, `DROP_NO_ARGS`, `UNWRAP_COMMANDS`, `UNWRAP_SECOND_ARG`, `SPACE_COMMANDS`, `SYMBOL_MAP`
 3. **Bóc vỏ dự phòng:** lệnh chưa biết → xét đối số:
    - Kích thước (`3pt`, `\textwidth`) → xóa
    - Chữ thuần → unwrap (giữ chữ)
@@ -40,11 +39,11 @@ Chạy trong `clean_text()` (bước content).
 
 **Lợi ích:**
 - ✅ Giảm lệnh LaTeX sót
-- ✅ Dễ mở rộng (thêm vào bảng)
+- ✅ Dễ mở rộng (thêm vào bảng trong `m2_cleanup.py`)
 - ✅ Bảo vệ `\cite`, `\ref`, toán
 - ✅ Thống kê lệnh lạ cho vòng lặp cải tiến
 
-📖 **Chi tiết:** Xem [docs/CHANGELOG_M2_IMPROVEMENT.md](docs/CHANGELOG_M2_IMPROVEMENT.md)
+📖 **Chi tiết:** Xem [docs/CHANGELOG_M1_M2.md](docs/CHANGELOG_M1_M2.md)
 
 ---
 
@@ -55,17 +54,17 @@ src/
 ├── run_m2.py                           # điều phối: chạy 3 bước cho từng bài, đo hiệu năng, xuất Parquet
 ├── parser/
 │   ├── m2_gather.py                    # tìm file gốc, theo \input/\include, danh sách file thừa
-│   ├── m2_macro_expansion.py           # **[TẦNG 1]** bung macro và môi trường tự định nghĩa
-│   ├── m2_hierarchy.py                 # dựng cây thô -> vN/tree_raw.json
-│   ├── m2_cleanup.py                   # **[TẦNG 2]** làm sạch LaTeX, chuẩn hóa toán, bóc vỏ dự phòng
-│   ├── m2_sentences.py                 # tách câu (hàm dùng chung)
+│   ├── m2_hierarchy.py                 # gọi Tầng 1 bung macro và dựng cây thô -> vN/tree_raw.json
+│   ├── m2_cleanup.py                   # [TẦNG 1 & 2] bung macro, làm sạch LaTeX, chuẩn hóa toán, bóc vỏ dự phòng
+│   ├── m2_sentences.py                 # tách câu theo quy tắc/regex
 │   ├── m2_content_dedup.py             # cây thô -> elements.json, hierarchy.json, parse_status.json
 │   ├── m2_bibitem.py                   # đọc .bib và chuyển \bibitem thành BibTeX
 │   ├── m2_bib_dedup.py                 # khử trùng BibTeX, chọn khóa, đổi \cite, dòng bảng bibtex
-│   └── export_unknown_commands.py      # phân tích bộ đếm lệnh lạ
+│   ├── m2_inspect.py                   # kiểm tra nhanh chất lượng parse M2 theo bài
+│   └── m2_pick_papers.py               # chọn bài đủ entry/ứng viên cho M3
 ├── matching/m3_candidates.py           # sinh cặp ứng viên (run_m2.py gọi)
-├── utils/{config,schemas,benchmark}.py
-└── tests/{test_m2_pipeline,test_m2_bibliography}.py
+├── utils/{config,logger,schemas,benchmark}.py
+└── tests/test_m2_*.py                  # 7 file test M2 (gather, hierarchy, text, bibliography, parser, pipeline, export_parquet)
 ```
 
 Thứ tự trong `run_m2.py` cho mỗi bài là **bib → tree → content**. Bước `bib` phải chạy trước vì nó tạo `cite_map.json`, mà bước `content` dùng để đổi `\cite` trước khi khử trùng.
@@ -75,10 +74,10 @@ Thứ tự trong `run_m2.py` cho mỗi bài là **bib → tree → content**. B�
 Yêu cầu Python **3.10 trở lên** (thư mục `parser/` trùng tên với module `parser` cũ của Python < 3.10).
 
 ```bash
-pip install -r src/requirements.txt pytest
+pip install -r requirements.txt
 ```
 
-M2 cần `pandas`, `pyarrow`, `psutil` (đã có trong `requirements.txt`). Trên Windows đặt `PYTHONUTF8=1` (PowerShell: `$env:PYTHONUTF8="1"`) để in tiếng Việt không lỗi.
+M2 cần `pandas`, `pyarrow`, `psutil` (đã có trong `requirements.txt` ở thư mục gốc). Trên Windows đặt `PYTHONUTF8=1` (PowerShell: `$env:PYTHONUTF8="1"`) để in tiếng Việt không lỗi.
 
 ## 3. Chạy
 
@@ -114,17 +113,17 @@ python src/parser/m2_gather.py --ids 2602.04870 --gather --verbose   # file gố
 
 ### Phân tích lệnh lạ (Unknown Commands)
 
-Sau khi chạy M2, xem thống kê lệnh lạ để cải tiến:
+Sau khi chạy M2, kiểm tra thống kê lệnh lạ trong `benchmark/unknown_commands.json` hoặc chạy `m2_inspect.py` để rà soát chất lượng câu theo từng bài:
 
 ```bash
-python src/parser/export_unknown_commands.py --corpus-dir data_m2 --top 50
+python src/parser/m2_inspect.py --corpus-dir data_m2 --ids 2602.04870
 ```
 
-File `benchmark/unknown_commands.json` chứa bộ đếm các lệnh LaTeX chưa được xử lý. Nếu file rỗng `{}`, nghĩa là **tất cả lệnh đã được xử lý** (kết quả tốt!).
+File `<corpus>/benchmark/unknown_commands.json` chứa bộ đếm các lệnh LaTeX chưa có trong bảng phân loại. Nếu file là `{}` thì **tất cả lệnh gặp phải đã được xử lý sạch**.
 
 **Vòng lặp cải tiến:**
-1. Xem top 30-50 lệnh lạ
-2. Thêm vào bảng `UNWRAP_COMMANDS`, `DROP_NO_ARGS`, `DROP_WITH_ARGS` trong `m2_cleanup.py`
+1. Mở `<corpus>/benchmark/unknown_commands.json` xem các lệnh lạ xuất hiện nhiều nhất
+2. Thêm vào bảng `UNWRAP_COMMANDS`, `DROP_NO_ARGS`, `DROP_WITH_ARGS` trong `src/parser/m2_cleanup.py`
 3. Chạy lại M2
 4. So sánh kết quả
 
@@ -206,17 +205,15 @@ Test tự dựng corpus giả đúng định dạng M1 và kiểm tra: tìm file
 - Từ file gốc đi theo `\input`/`\include` đệ quy; lệnh bị comment coi là chữ thường. File không nằm trên đường này là **file thừa** và không được parse.
 - `reason` mô tả độ tin cậy: `ok`, `ambiguous`, `weak_candidate`, `root_without_begin_document`, `fallback_begin_document`, `no_documentclass`, `no_tex_files`.
 
-### 5.2 Tầng 1: Bung macro (`m2_macro_expansion.py`) **[MỚI]**
+### 5.2 Tầng 1: Bung macro (`m2_cleanup.expand_user_macros`)
 
-Chạy sau gom file, trước dựng cây. Xử lý riêng từng version.
+Chạy sau khi gộp file (`expand_includes`), trước khi tách thân tài liệu trong `m2_hierarchy.py`. Xử lý riêng từng version:
 
-1. Thu thập định nghĩa: `\newcommand`, `\def`, `\DeclareMathOperator`, `\newenvironment`, `\newtheorem`
-2. Xóa các dòng định nghĩa
-3. Bung lặp (tối đa 10 vòng, có giới hạn kích thước)
-4. Không bung trong `\cite{}`, `\ref{}`, `\label{}`
-5. Bỏ qua định nghĩa phức tạp (`\csname`, `\expandafter`)
-6. Xử lý điều kiện: bỏ `\iffalse...\fi` và môi trường `comment`
-7. Bung viết tắt phổ biến: `\ie`, `\eg`, `\etal`
+1. Thu thập định nghĩa (`collect_macros`): `\newcommand`, `\renewcommand`, `\providecommand`, `\def` (chỉ nhận macro có thân `{...}`)
+2. Xóa các câu lệnh định nghĩa đã thu thập khỏi văn bản
+3. Bung lặp (mặc định `max_rounds=4`, có chặn phình văn bản theo `3 * len(text) + 20000`)
+4. Bỏ qua macro phức tạp hoặc được bảo vệ (`\csname`, `_PROTECTED_MACROS`, macro 0 đối số chứa `#`)
+5. Bung viết tắt phổ biến (`BUILTIN_ABBREVS`): `\ie`, `\eg`, `\etal`, `\cf`, `\vs`, `\wrt`, `\etc`
 
 **Ví dụ:**
 ```latex
@@ -231,7 +228,7 @@ The \texttt{FooNet} achieves high accuracy.
 ### 5.3 Dựng cây (`m2_hierarchy.py`)
 
 1. Mở rộng `\input`/`\include` tại chỗ thành một chuỗi LaTeX duy nhất, đúng thứ tự đọc.
-2. **[TẦNG 1]** Bung macro và môi trường tự định nghĩa.
+2. **[TẦNG 1]** Gọi `m2_cleanup.expand_user_macros` để bung macro và viết tắt phổ biến.
 3. Lấy phần giữa `\begin{document}` và `\end{document}`.
 4. Quét thành danh sách khối: heading, đoạn văn, công thức, hình/bảng, danh sách, khung `abstract`. Các lệnh đầu bài `\title`, `\author`, `\date`, `\thanks`, `\affiliation`... bị bỏ (không phải nội dung bài).
 5. Lồng các heading thành cây. **Cấp heading tự nhận theo các lệnh phân mục bài thực sự dùng**: bài có `\chapter` thì chapter là cấp 1; bài chỉ có `\section`/`\subsection`/`\paragraph` thì section là cấp 1. `\section*` và phụ lục được giữ; mục References và `thebibliography` bị bỏ.
@@ -341,3 +338,8 @@ Tách ở `.`, `!`, `?` khi câu sau bắt đầu bằng chữ hoa, ngoặc mở
 | Không có `elements.json` của một bài | Bài đó chưa có `paper.json` (M1 chưa xong) hoặc thư mục `vN` rỗng. |
 | UnicodeEncodeError khi in tiếng Việt (Windows) | `$env:PYTHONUTF8="1"` trước khi chạy. |
 | File `unknown_commands.json` rỗng | **Kết quả tốt!** Tầng 1 và Tầng 2 đã xử lý hết các lệnh. |
+
+## 9. Tài liệu thêm
+
+- **[README.md](README.md)**: Hướng dẫn tổng quan toàn bộ đồ án (M1 → M2 → M3)
+- **[docs/CHANGELOG_M1_M2.md](docs/CHANGELOG_M1_M2.md)**: Chi tiết thay đổi M1/M2 và kiến trúc hai tầng trong `m2_cleanup.py`

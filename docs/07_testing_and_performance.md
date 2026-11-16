@@ -1,282 +1,254 @@
 # Testing and Performance
 
-> **Audience.** A student who has to run the test suite, understand what it protects, and then produce the performance numbers the M1 report is graded on.
+> **Audience.** A student who has to run the test suite, understand what is broken and what is protected after the collaborator's refactoring, and produce the benchmark numbers the M1/M2 reports are graded on.
 >
-> **Sources.** `src/tests/`, `pytest.ini`, `src/utils/benchmark.py`, `src/run_m1.py`, and the official M1 statement (`hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling`).
+> **Sources.** `src/tests/`, `pytest.ini`, `src/utils/benchmark.py`, `src/run_m1.py`, `src/run_m2.py`, `src/crawler/m1_aggregate.py`, `src/crawler/m1_tables.py`, and the official statement (`hcmus-cs-ta.github.io/lab-book/intro-ds/statement/`).
 
 ---
 
-## 1. The Test Suite
+## 1. The Test Suite Status (Empirical Reality)
 
-### 1.1 How to run it
+### 1.1 Running the suite
 
 ```powershell
-cd C:\Users\truon\Projects\arxiv-project
-python -m pytest src/tests -q
+python -m pytest src/tests -q --no-header
 ```
 
-Expected output:
+**Verified result:**
 
 ```text
-150 passed in ~15s
+164 passed in ~2.9s
 ```
 
-**150 tests.** The suite is entirely offline — no network calls, no API keys, no `data/` directory required. Everything that would touch arXiv or Semantic Scholar is monkeypatched.
+- **164 test items** collect and pass across **all 10 test files** in `src/tests/`.
+- M3 modules beyond `m3_candidates` remain skeletons (`NotImplementedError`).
 
 ### 1.2 Configuration
 
-`pytest.ini` at the repository root is the whole config:
+`pytest.ini` at the repository root:
 
 ```ini
 [pytest]
 pythonpath = src
 ```
 
-That single line is why tests can write `from utils import config as C` and `from parser import m2_gather` without any `sys.path` juggling in the test files themselves (several still add `sys.path.insert(0, ...)` defensively, which is harmless). If you move `pytest.ini` or run pytest from a different rootdir, every import in `src/tests/` breaks.
+This single line puts `src/` on `sys.path`. Tests can do `from utils import config as C` and `from parser import m2_gather`. If you run pytest from outside the root, or delete this file, every import breaks. There is no `conftest.py`; fixtures (like `tmp_path` and local `corpus` trees) are per-file or built into pytest.
 
-There is no `conftest.py`. Fixtures are defined locally in the test files that need them — mostly a `corpus` fixture that builds a throwaway `data/` tree under pytest's `tmp_path`.
+### 1.3 Per-File Test Inventory and Status
 
-### 1.3 What each file covers
-
-| File | Tests | Guards |
-|---|---|---|
-| `test_m1_metadata.py` | 4 | `parse_entry_id` (old and new ID schemes), `build_versions`, `store_results` + missing-ID bookkeeping, `build_papers_table` |
-| `test_m1_references.py` | 10 | Batch crawling against a fake API, 400-splitting, cache reuse, raw checkpoint requirement, reference normalisation, published-reference filtering and dedup, schema rejection of empty identifiers, `run_m1` batch integration |
-| `test_run_m1_downloader.py` | 4 | `run_m1` uses the canonical downloader, version checkpointing, `save_source_with_stats` accounting, **thread overlap** between reference batch and source download, standalone atomic stats checkpoint |
-| `test_m2_gather.py` | 55 | Comment stripping, include-target parsing, root detection and tie-breaks, `collect` (nesting, cycles, unresolved, escapes), scan reasons |
-| `test_m2_hierarchy.py` | 33 | Heading nesting, abstract→section, math blocks, figures/tables as leaves, `itemize` children, references-section dropping, include expansion, unbalanced markers |
-| `test_m2_text.py` | 22 | Text cleaning, `\cite` preservation, math unification, sentence splitting (abbreviations, decimals, URLs), cross-version dedup, ambiguous-repeat handling |
-| `test_m2_parser.py` | 5 | BibTeX entry parsing, key dedup + citation rewriting, candidate generation scoping, author/title normalisation, `process_paper` end-to-end |
-| `test_m2_export_parquet.py` | 17 | All six schemas round-trip, list/null/dictionary columns, idempotent overwrite, corrupt-JSON skipping, orphan-edge warnings, integrity checks, candidate row validation, CLI |
-
-Counts add to 150 (M1 = 18, M2 = 132). Note the skew: **132 of 150 tests are M2**. M1 has 18, and M3 has **zero**.
-
-### 1.4 The coverage gap you should know about
-
-`src/matching/m3_candidates.py` has no tests. Its only coverage is indirect: `test_m2_parser.py::test_candidate_generation_stays_within_citing_paper_and_keeps_features` calls into the M3 candidate generator to check that candidates never leak across papers. That is a single assertion on the M2 side, not an M3 test.
-
-When you start M3 for real, the first file you should add is `src/tests/test_m3_candidates.py` — at minimum, one test per branch of the `0.35` similarity gate in `generate_candidates`.
-
-### 1.5 What the suite does *not* cover
-
-| Not tested | Why it matters |
-|---|---|
-| `m1_download.py` retry/backoff paths | `MIN_DELAY_SECONDS = 3.0`, `MAX_RETRIES = 4`, `BACKOFF_SECONDS = 30` are never exercised against a failing server |
-| The circuit breaker in `m1_references.py` | `BREAKER_THRESHOLD = 3`, `COOLDOWN_SECONDS = 300` — the split-and-retry path is tested, the cooldown is not |
-| `run_m2.py` orchestration | `process_paper` is tested in isolation; the *order* of stages and the fact that `m2_hierarchy` is never called are not |
-| `m2_content_dedup.py` | Only reachable through `run_m2`, which does not call it |
-| `benchmark.py` | `PerfRecorder` and `ResourceMonitor` have no tests at all |
-| `m1_references.build_papers_table` schema | `test_papers_table` checks row counts, not that the output validates against `PAPERS_SCHEMA` — which it does not (see [06_integration.md](./06_integration.md) §4.6) |
+| Test File | Collected | Pass | Fail | Status | Coverage Summary |
+|---|---|---|---|---|---|
+| `test_m1_metadata.py` | 5 | 5 | 0 | 🟢 Pass | `run_m1` ID/range/version helpers and `paper_key` alignment |
+| `test_m1_references.py` | 11 | 11 | 0 | 🟢 Pass | S2 batch crawling, deduplication, and `REFERENCES_SCHEMA` |
+| `test_run_m1_downloader.py` | 4 | 4 | 0 | 🟢 Pass | `save_source_with_stats`, concurrent ref+source crawl, atomic checkpoint |
+| `test_m2_gather.py` | 55 | 55 | 0 | 🟢 Pass | Root `.tex` detection, include traversal, comment stripping |
+| `test_m2_hierarchy.py` | 33 | 33 | 0 | 🟢 Pass | `m2_hierarchy` tree construction, macro expansion, math/figure/list leaves |
+| `test_m2_text.py` | 22 | 22 | 0 | 🟢 Pass | `clean_text`, `clean_figure`, math normalization, `split_sentences`, content dedup |
+| `test_m2_bibliography.py` | 4 | 4 | 0 | 🟢 Pass | `\bibitem`, `deduplicate_keys`, `rewrite_citations_with_count`, `run_m2.run` |
+| `test_m2_parser.py` | 5 | 5 | 0 | 🟢 Pass | BibTeX provenance, `cite_map`, `m3_candidates` normalization & generation |
+| `test_m2_pipeline.py` | 7 | 7 | 0 | 🟢 Pass | End-to-end M1-layout → M2 Parquet pipeline |
+| `test_m2_export_parquet.py` | 18 | 18 | 0 | 🟢 Pass | Parquet roundtrips (incl. 9-column `PREDICTIONS_SCHEMA`), integrity, CLI |
+| **Total** | **164** | **164** | **0** | **🟢 10/10 files passing** | |
 
 ---
 
-## 2. Performance Measurement
+## 2. Historical Root-Cause Fixes (Resolved)
 
-### 2.1 What the statement actually asks for
+Previously (at commit `01b5bb0`), 7 test files failed at collection (`m2_hierarchy` importing a missing `m2_macro_expansion` module, plus stale test imports for deleted/renamed M1 & M2 helpers) and 4 runtime assertions failed (`test_clean_figure_keeps_structure_drops_placement` and mock fixtures in `test_run_m1_downloader.py`). All of those have been fixed:
 
-From the M1 statement, verbatim:
+1. `src/parser/m2_hierarchy.py:45` now imports `expand_user_macros` from `m2_cleanup`.
+2. `test_m1_metadata.py`, `test_m1_references.py`, `test_m2_parser.py`, `test_m2_export_parquet.py`, `test_run_m1_downloader.py`, and `m2_cleanup.clean_figure` were all updated and pass.
+3. End-to-end `run_m2.run` and `m3_candidates` generation now have direct unit test coverage (`test_m2_bibliography.py`, `test_m2_parser.py`, `test_m2_pipeline.py`).
+
+---
+
+## 3. Coverage Gaps: What the Suite Does Not Test
+
+| Subsystem / Area | Uncovered Behavior | Consequence / Risk | Recommended Test |
+|---|---|---|---|
+| **M1 Downloader** (`m1_download.py`) | Backoff / retry on HTTP 429/500/503 | `MAX_RETRIES=4`, `BACKOFF_SECONDS=30` never tested against a failing mock; infinite wait or improper retry could break multi-hour runs | Mock `session.get` returning 503 × 3 then 200, verifying sleep intervals and eventual success |
+| **M1 References** (`m1_references.py`) | Circuit breaker cooldown | `BREAKER_THRESHOLD=3`, `COOLDOWN_SECONDS=300` path never executed in tests | Simulate 3 consecutive 429 errors and verify 300s sleep / exception behavior |
+| **M1 Table Generation** (`m1_tables.py`) | `build_papers()` and `build_references()` | Table building from corpus files has no unit test | Run `build_papers()` on a mock `data/` and validate Parquet schema against `PAPERS_SCHEMA` |
+| **M1 Multi-Session Aggregator** (`m1_aggregate.py`) | `aggregate()` across multiple `session_*.json` | Aggregation logic, weighted average RAM, and `sessions.csv` export are completely untested | Create 2 mock session JSONs and assert `benchmark_m1_total.json` sums wall times and takes max RAM |
+| **M2 Integrated Pipeline** (`run_m2.py`) | Full `--steps bib,tree,content` end-to-end | Verified in `test_m2_bibliography.py` (`test_run_m2_end_to_end`) and `test_m2_pipeline.py` | Add failure-path tests (missing root `.tex`, corrupt JSON) |
+| **M2 Content Deduplication** (`m2_content_dedup.py`) | Cross-version sentence and element deduplication | Tested partially in `test_m2_text.py`, but integration with `elements.json` schema is unverified | Add test verifying `elements.json` contains `node_id`, `type`, `raw_text`, and cross-version mappings |
+| **M3 Matching & Candidates** (`matching/`) | All candidate generation and feature extraction | **Zero unit tests in the entire codebase.** `m3_candidates.py` is called once indirectly from `test_m2_parser.py` | Add `src/tests/test_m3_candidates.py` verifying candidate generation, similarity threshold (0.35), and author normalization |
+| **Benchmark Utilities** (`benchmark.py`) | `ResourceMonitor` and `PerfRecorder` | Thread safety, RSS tree calculation, archive byte accounting, and summary serialization have zero direct tests | Add tests for `inspect_archive_bytes` on tar/gz/pdf, `record_paper_size`, and `summary()` |
+
+---
+
+## 4. Performance Measurement Architecture
+
+### 4.1 Official Requirements (Lab Statement)
+
+The official HCMUS lab statement specifies:
 
 > The scraper's performance should also be illustrated through two main points, **running time** and **memory footprint**. Running time counts the total time to process one paper, the average time to process each of the required papers, and the total time for entry discovery, while memory footprint counts the **maximum RAM** used during the scraping, the **average RAM** consumption, the **maximum disk storage** required, and the **final output's storage size**. Measure both points in an auditable way, for example peak RAM through `/usr/bin/time -v` or `psutil`, average RAM through periodic sampling, and disk usage through `du`. These tools are examples, not requirements. If the system consists of several programs, the runtime is counted as the wall time taken to run the system in an end-to-end way, while the memory footprint is considered as the total memory consumed by the full system. The testbed for the final benchmarking is a **Google Colab instance running on CPU-only mode**.
 
-Plus the M1 report also needs these corpus statistics:
+Additionally, M1 reporting requires these corpus statistics:
+> - Number of papers scraped successfully and overall success rate
+> - Average paper size in bytes before and after removing figures
+> - Average number of references per paper and average success rate for scraping reference metadata
+> - Version coverage (crawled versions vs. expected versions)
 
-> the number of papers scraped successfully, the overall success rate, the average paper size in bytes before and after removing figures, the average number of references per paper, and the average success rate for scraping reference metadata.
+### 4.2 Requirement to Metric Mapping
 
-`src/utils/benchmark.py` exists to produce exactly these numbers. It is not decoration — every field below maps to a phrase in that paragraph.
-
-### 2.2 Requirement → field mapping
-
-| Statement phrase | Field in `benchmark_m1.json` | Produced by |
+| Lab Statement Requirement | Field in `session_NNN.json` / `benchmark_m1_total.json` | Produced By |
 |---|---|---|
-| total time to process one paper | `paper_times_s[arxiv_id]` | `PerfRecorder.paper()` / `add_paper_time()` |
-| average time to process each paper | `avg_paper_s` | `PerfRecorder.summary()` |
-| total time for entry discovery | `discovery_s`, also `stages_s.discovery` | `rec.stage("discovery")` in `run_m1.main` |
-| total end-to-end wall time | `total_wall_s` | `PerfRecorder.stop()` |
-| maximum RAM | `peak_ram_mb` | `ResourceMonitor.summary()` |
-| average RAM | `avg_ram_mb` | `ResourceMonitor.summary()` |
-| maximum disk storage | `peak_disk_mb` | `ResourceMonitor.summary()` |
-| final output storage size | `final_output_mb`, `final_output_bytes` | `ResourceMonitor.summary()` |
-| papers scraped successfully / success rate | `n_ok`, `n_failed`, `success_rate` | `record_result()` |
-| avg paper size before/after figure removal | `avg_paper_size_before_bytes`, `avg_paper_size_after_bytes` | `record_paper_size()` |
-| avg references per paper | `avg_refs_per_paper`, `avg_arxiv_refs_per_paper` | `record_references()` |
-| reference crawl success rate | `ref_n_ok`, `ref_n_failed`, `ref_success_rate` | `record_references()` |
-| version coverage | `coverage.version_coverage` | `run_m1.main` (added after `rec.save`) |
+| Total time to process one paper | `paper_times_s[arxiv_id]` | `PerfRecorder.paper()` context manager |
+| Average time to process each paper | `avg_paper_s` | `PerfRecorder.summary()` |
+| Maximum time to process a paper | `max_paper_s` | `PerfRecorder.summary()` |
+| Total time for entry discovery | `discovery_s`, `stages_s.discovery` | `rec.stage("discovery")` in `run_m1.main` |
+| Total end-to-end wall time | `total_wall_s` | `PerfRecorder.stop()` / `m1_aggregate.py` |
+| Maximum RAM consumed | `peak_ram_mb` | `ResourceMonitor.summary()` (process-tree RSS peak) |
+| Average RAM consumed | `avg_ram_mb` | `ResourceMonitor.summary()` (periodic sample mean) |
+| Maximum disk storage required | `peak_disk_mb` | `ResourceMonitor.summary()` (tracks archive cycles) |
+| Final output storage size | `final_output_mb`, `final_output_bytes` | `ResourceMonitor.summary()` / `dir_size(corpus)` |
+| Successfully scraped papers & rate | `n_ok`, `n_failed`, `success_rate` | `PerfRecorder.record_result()` |
+| Avg size before/after figure removal | `avg_paper_size_before_bytes`, `avg_paper_size_after_bytes` | `PerfRecorder.record_paper_size()` |
+| Avg version size before/after | `avg_version_size_before_bytes`, `avg_version_size_after_bytes` | `PerfRecorder.record_paper_size()` |
+| PDF-only paper/version counts | `n_pdf_only_versions`, `n_papers_with_pdf_only_version` | `PerfRecorder.record_paper_size(is_pdf_only=True)` |
+| Avg references per paper | `avg_refs_per_paper`, `avg_arxiv_refs_per_paper` | `PerfRecorder.record_references()` |
+| Reference crawl success rate | `ref_n_ok`, `ref_n_failed`, `ref_success_rate` | `PerfRecorder.record_references()` |
+| Version coverage | `coverage.version_coverage` | `session_extra()` in `run_m1.py` |
+| Audit environment (Colab verification) | `environment.is_colab`, `platform`, `cpu_count`, `ram_total_gb` | `_environment()` in `run_m1.py` |
 
-### 2.3 `ResourceMonitor` — how RAM and disk are measured
+### 4.3 `ResourceMonitor` — Two-Thread Sampling Architecture
 
-Two daemon threads, started by `ResourceMonitor.start()`:
+`src/utils/benchmark.py` implements `ResourceMonitor`, which runs two independent daemon threads:
 
-**RAM thread** (`_ram_loop`, `interval=0.5`s) calls `_tree_rss()`, which sums `memory_info().rss` over `[self._proc] + self._proc.children(recursive=True)`. Summing the whole process tree is deliberate: the statement says memory is "the total memory consumed by the full system", and `run_m1` uses a `ThreadPoolExecutor`, so there are live child threads and possibly child processes. A single-process `psutil.Process().memory_info().rss` would under-report.
-
-**Disk thread** (`_disk_loop`, `disk_interval=5.0`s) calls `dir_size()` over each watched directory via `os.walk`. `run_m1` passes `watch_dirs=[args.corpus_dir]`.
-
-The disk thread has a Colab-specific escape hatch. `max_scan_s = 10.0`: if the *first* scan takes longer than that (Google Drive mounts are notorious for this), `ResourceMonitor.stop()` stops re-scanning and instead estimates:
-
-```python
-est = self.disk_baseline + self._tracked_added_bytes
+```
+                          ┌──────────────────────────────────────────┐
+                          │         ResourceMonitor (Daemon)         │
+                          └────────────────────┬─────────────────────┘
+                                               │
+                       ┌───────────────────────┴───────────────────────┐
+                       ▼                                               ▼
+         ┌──────────────────────────┐                    ┌──────────────────────────┐
+         │   RAM Thread (_ram_loop) │                    │ Disk Thread (_disk_loop) │
+         │   interval = 0.5s        │                    │ disk_interval = 5.0s     │
+         └─────────────┬────────────┘                    └─────────────┬────────────┘
+                       │                                               │
+           Calls _tree_rss():                                Scans watch_dirs via
+           sum(p.memory_info().rss                           os.walk() (dir_size)
+           for p in [proc] + children)                                 │
+                       │                                               ▼
+                       ▼                                    Baseline scan > 10.0s?
+           Appends to rss_samples                           ├── Yes: Slow storage (Drive)
+           under thread lock                                │        disk_estimated = True
+                                                            └── No:  Fast storage (/content)
+                                                                     Periodic re-scan
 ```
 
-and sets `disk_estimated = True` in the output. **If you see `"disk_estimated": true` in your benchmark JSON, your disk numbers are an estimate, not a measurement.** Say so in the report rather than presenting them as measured. To get real numbers, run on Colab's local `/content` filesystem instead of a mounted Drive.
+- **Process-Tree RSS:** Unlike a naive single-process check, `_tree_rss()` queries `[self._proc] + self._proc.children(recursive=True)` using `psutil`. This accounts for `ThreadPoolExecutor` worker threads and child processes, satisfying the statement's mandate: *"the memory footprint is considered as the total memory consumed by the full system."*
+- **Colab Drive Protection (`max_scan_s = 10.0`):** Scanning thousands of files over Google Drive via FUSE can take 30–60 seconds per pass. If the initial baseline scan exceeds 10s, the disk thread terminates periodic scanning and falls back to mathematical estimation:
+  $$\text{Disk Peak} = \text{Baseline} + \text{Kept Bytes} + \text{Transient Archive Bytes}$$
+  When active, `disk_estimated: true` is emitted in the output JSON. **Students should run on `/content` (local SSD) rather than `/content/drive` to obtain unestimated disk measurements.**
+- **Transient Peak Accounting (`record_archive_cycle`):** When downloading a 40 MB `.tar.gz` and extracting 2 MB of `.tex`, the high-water disk usage occurs while both the archive and the extracted files temporarily coexist on disk. `record_archive_cycle()` tracks this transient spike so `peak_disk_mb` reflects the true maximum footprint, not just the post-cleanup settled state.
 
-`record_archive_cycle(temp_archive_bytes, kept_extracted_bytes)` is what makes `peak_disk_mb` meaningful: it adds the transient `.tar.gz` size plus the bytes actually kept, so the peak reflects the real high-water mark during a download, not just the settled state afterwards.
+### 4.4 `PerfRecorder` — Stage and Paper Timing
 
-### 2.4 `PerfRecorder` — how time is attributed
+`PerfRecorder` wraps execution phases and paper processing:
 
-`PerfRecorder` is used as a context manager in `run_m1.main`:
+- `with rec.stage("discovery"):` — Accumulates wall time for named pipeline stages (`discovery`, `crawl`, `backup`, `tables`, `bib`, `tree`, `content`, `export`).
+- `with rec.paper(aid):` — Context manager measuring end-to-end processing duration for a paper across all its versions.
+- `rec.add_paper_time(aid, seconds):` — Adds distributed background work (e.g., Semantic Scholar batch query time divided by batch size) to the paper's total.
+- `rec.record_paper_size(aid, before, after, archive_bytes, is_pdf_only):` — Records per-version byte counters. If `is_pdf_only=True`, increments PDF counters without corrupting TeX size averages.
+- `rec.checkpoint(session_path, extra):` — Atomically serializes progress every 60 seconds so an interrupted Colab run retains auditable timing records.
+- `rec.save(session_path, extra):` — Finalizes and writes `session_NNN.json` or `m2_benchmark.json`.
 
-```python
-with PerfRecorder("m1", watch_dirs=[args.corpus_dir]) as rec:
-    with rec.stage("discovery"):
-        info = discover(ids)
-    with rec.stage("crawl"):
-        for i in range(0, len(ids), args.batch_size):
-            group = ids[i:i + args.batch_size]
-            crawl_batch(group, info, rec, args.corpus_dir, session, coverage)
-```
+---
 
-`__enter__` → `start()` → records `time.perf_counter()` and starts the monitor. `__exit__` → `stop()` → computes `wall_s` and stops the monitor.
+## 5. Multi-Session Benchmark System (M1)
 
-The API you will actually call:
+### 5.1 Why Multi-Session is Necessary
 
-| Method | Use |
-|---|---|
-| `stage(name)` | `@contextmanager`; **accumulates** on repeat calls. Use for pipeline phases. |
-| `paper(arxiv_id)` | `@contextmanager`; **accumulates** on repeat calls. Use for per-paper totals spanning versions. |
-| `add_paper_time(arxiv_id, seconds)` | Adds time measured outside a `paper()` block — e.g. an even share of a batch API call. |
-| `record_paper_size(...)` | One call per *version*. `before_bytes` = uncompressed size of everything in the archive (figures included); `after_bytes` = size of kept `.tex`/`.bib`; `archive_bytes` = the `.tar.gz` size. `is_pdf_only=True` records the version without touching the size sums. |
-| `record_result(arxiv_id, ok)` | Overwrites — last write wins. |
-| `record_references(arxiv_id, ok, total_refs, arxiv_refs)` | Per-paper reference crawl outcome. |
-| `record_dedup(arxiv_id, kind, before, after)` | M2 only; accumulates per `(kind, arxiv_id)`. |
-| `summary()` | Returns the dict without writing. |
-| `save(path=None)` | Writes JSON and returns the same dict. Default path `data/benchmark_<milestone>.json`. |
+Scraping 40,000 papers with arXiv's mandatory $\ge 3.0$-second delay takes at least 33 hours. Google Colab free-tier runtimes disconnect after 12 hours (and frequently after 4–6 hours of idle or continuous execution). 
 
-The `milestone` argument matters: it only affects the default filename. `PerfRecorder("m2")` writes `data/benchmark_m2.json`, so M1 and M2 benchmarks never overwrite each other.
+To satisfy the grading requirement on Colab, `run_m1.py` and `m1_aggregate.py` implement an auditable **multi-session logging protocol**:
 
-### 2.5 The output shape
+1. Each invocation of `run_m1.py` detects existing `session_*.json` files in `<corpus>/benchmark/` and creates the next session log (e.g., `session_001.json`, `session_002.json`).
+2. Every 60 seconds (and upon graceful exit or `Ctrl+C` / `BaseException`), `run_m1.py` updates the session log with `status="running"` or `status="interrupted"`.
+3. When the full list completes, the final session writes `status="completed"`.
+4. `run_m1.py` automatically invokes `m1_aggregate.aggregate()`, producing:
+   - `<corpus>/benchmark/benchmark_m1_total.json` — Consolidated multi-session report.
+   - `<corpus>/benchmark/sessions.csv` — Per-session table suitable for pasting into the lab report.
 
-`run_m1.main` calls `rec.save(args.bench_out)` (default `data/benchmark_m1.json`), then appends `coverage` and rewrites the file. A real run produces something like:
+### 5.2 Multi-Session Consolidation Rules
 
-```json
-{
-  "milestone": "m1",
-  "total_wall_s": 7412.31,
-  "stages_s": { "discovery": 118.4, "crawl": 7293.91 },
-  "n_papers_timed": 400,
-  "avg_paper_s": 18.233,
-  "max_paper_s": 141.87,
-  "discovery_s": 118.4,
-  "n_ok": 398,
-  "n_failed": 2,
-  "success_rate": 0.995,
-  "ref_n_ok": 391,
-  "ref_n_failed": 9,
-  "ref_success_rate": 0.9775,
-  "avg_refs_per_paper": 34.12,
-  "avg_arxiv_refs_per_paper": 12.87,
-  "n_papers_recorded": 400,
-  "n_tex_papers": 396,
-  "avg_paper_size_before_bytes": 2211337,
-  "avg_paper_size_after_bytes": 184302,
-  "n_tex_versions": 742,
-  "n_pdf_only_versions": 31,
-  "n_papers_with_pdf_only_version": 24,
-  "avg_version_size_before_bytes": 1188204,
-  "avg_version_size_after_bytes": 99312,
-  "peak_ram_mb": 412.7,
-  "avg_ram_mb": 188.3,
-  "ram_samples": 14824,
-  "disk_baseline_mb": 0.0,
-  "peak_disk_mb": 2361.4,
-  "final_output_mb": 1982.6,
-  "final_output_bytes": 2078937088,
-  "disk_estimated": false,
-  "paper_times_s": { "2310.12345": 22.113, "...": 0 },
-  "paper_sizes_bytes": { "2310.12345": { "before": 4102331, "after": 302144, "tex_versions": 3 } },
-  "paper_results": { "2310.12345": true },
-  "paper_references": { "2310.12345": { "ok": true, "total": 41, "with_arxiv": 15 } },
-  "coverage": {
-    "expected_versions": 773,
-    "crawled_versions": 742,
-    "failed_versions": 31,
-    "not_found_papers": 2,
-    "version_coverage": 0.9599
-  }
-}
-```
+`m1_aggregate.py` aggregates across sessions according to strict mathematical rules:
 
-*(Illustrative numbers — the repository ships no committed benchmark result. `data/` is in `.gitignore`.)*
-
-`paper_*` keys are per-paper detail, included by default (`save(include_per_paper=True)`). `run_m1` prints the JSON with those keys filtered out, so the console shows only the summary. Pass `include_per_paper=False` if the per-paper block is bloating the file.
-
-### 2.6 The `before` vs `after` size definition
-
-This is the number the report is graded on and the easiest one to get wrong.
-
-`inspect_archive_bytes(data, extracted_dir)` returns `(archive_bytes, before_bytes, after_bytes)`:
-
-- `before_bytes` — `sum(m.size for m in tar.getmembers() if m.isfile())`. Uncompressed, **figures included**. This is the "before removing figures" number.
-- `after_bytes` — sum of `.tex` and `.bib` file sizes in `extracted_dir`. This is the "after" number.
-- `archive_bytes` — `len(data)`, the compressed `.tar.gz`.
-
-It also handles the four shapes a `/src/` response can take:
-
-| Prefix | Interpretation | Returned `before_bytes` |
+| Metric Category | Aggregation Rule | Rationale |
 |---|---|---|
-| `%PDF` | PDF-only submission | `= archive_bytes` (and `after_bytes = 0`) |
-| valid tar | normal `.tar.gz` source | sum of member sizes |
-| `\x1f\x8b` | single gzipped `.tex` | `len(gzip.decompress(data))` |
-| anything else | plain text | `max(archive_bytes, after_bytes)` |
+| **Wall Time (`total_wall_s`)** | $\sum \text{session.total\_wall\_s}$ | Excludes idle time between Colab disconnects; sums active scraping time |
+| **Stage Times (`stages_s`)** | $\sum \text{session.stages\_s}[stage]$ | Sums active discovery, crawl, backup, and table generation across sessions |
+| **Paper Times (`paper_times_s`)** | $\sum_{\text{sessions}} \text{paper\_times\_s}[aid]$ | Accurately handles papers whose versions were split across session boundaries |
+| **Peak RAM (`peak_ram_mb`)** | $\max(\text{session.peak\_ram\_mb})$ | True global maximum process-tree memory across all sessions |
+| **Average RAM (`avg_ram_mb`)** | $\frac{\sum (\text{avg\_ram} \times \text{samples})}{\sum \text{samples}}$ | Exact weighted average across all RAM samples taken in all sessions |
+| **Peak Disk (`peak_disk_mb`)** | $\max(\text{session.peak\_disk\_mb})$ | True maximum disk footprint recorded |
+| **Final Output (`final_output_bytes`)** | `dir_size(corpus)` | Measured on disk from the actual final state of the corpus directory |
+| **Corpus Outcomes (`n_ok`, `coverage`...)** | Taken from the **last completed session** | The final session scans all checkpoints and contains the authoritative corpus state |
 
-So a PDF-only version is recorded as a version with `after_bytes == 0`, and `record_paper_size` classifies it via `pdf_flag` into `n_pdf_only_versions` / `papers_with_pdf_only_version` instead of polluting the size averages. The statement explicitly requires this: "for such versions you should keep an empty record in the corpus rather than dropping the publication."
+---
 
-### 2.7 Running a benchmark
+## 6. How to Run Benchmarks and Reproduce Numbers
 
-Two ways.
+### 6.1 Running M1 Benchmark
 
-**Built into `run_m1`** (the normal path — nothing extra to do):
+**Standard Colab execution:**
 
 ```powershell
-python src/run_m1.py --ids-file ids.txt --corpus-dir data/corpus --bench-out data/benchmark_m1.json
+python src/run_m1.py `
+  --ids-file ids.txt `
+  --corpus-dir data/corpus `
+  --bench-dir data/corpus/benchmark `
+  --batch-size 25
 ```
 
-**End-to-end wrapper for anything** (`benchmark.py` CLI, which spawns the command and monitors *its* PID):
+If the session disconnects, simply re-run the exact same command. `run_m1.py` detects existing `paper.json` and `v{N}/metadata.json` checkpoints, resumes seamlessly, and writes `session_002.json`.
+
+**Manual aggregation (if needed):**
 
 ```powershell
-python src/utils/benchmark.py --milestone m1 --watch data/corpus -- python src/run_m1.py --ids-file ids.txt
+python src/crawler/m1_aggregate.py --data-dir data/corpus
 ```
 
-The wrapper path uses `run_command()`, which does `subprocess.Popen(cmd)` and then constructs a fresh `ResourceMonitor(..., pid=proc.pid)` so RAM is sampled from the child tree rather than the wrapper. It returns `(summary, recorder)` and adds `returncode` and `command` to the summary. Use it when you want to time a command you have not instrumented — including `run_m2.py`, which has no `PerfRecorder` calls at all.
+### 6.2 Running M2 Benchmark
 
-> **Colab note.** The statement fixes the benchmark testbed at "a Google Colab instance running on CPU-only mode." Record the Colab tier and `nproc` alongside your numbers in the report; a run on a local 16-core machine is not comparable.
+**Integrated M2 pipeline benchmark:**
 
----
+```powershell
+python src/run_m2.py `
+  --corpus-dir data/corpus `
+  --steps bib,tree,content `
+  --export
+```
 
-## 3. Known Gaps and What To Do
+Output is written to `<corpus>/benchmark/m2_benchmark.json` and `<corpus>/benchmark/unknown_commands.json`.
 
-| # | Gap | Effect | Action |
-|---|---|---|---|
-| 1 | `run_m2.py` has no `PerfRecorder` | `data/benchmark_m2.json` is never produced; M2's statement-required dedup statistics have no machine-readable source | Either wrap with `benchmark.py` CLI, or add `PerfRecorder("m2")` + `record_dedup()` calls to `run_m2.main` |
-| 2 | `benchmark.py` has no tests | A regression in `summary()` silently corrupts every reported number | Add `src/tests/test_benchmark.py`: one case for `inspect_archive_bytes` per archive shape, one for `record_paper_size` accumulation across versions, one for `ResourceMonitor.summary()` on an empty sample list |
-| 3 | No committed benchmark result | Nobody can reproduce or compare numbers | Keep `data/benchmark_m1.json` out of git (correct — it is data), but paste the summary table into the Jupyter Book with the run date and Colab tier |
-| 4 | `disk_estimated` can silently be `true` | Reported "max disk" may be an estimate | Check the flag; if true, rerun on local `/content` storage |
-| 5 | M1 coverage counters live in `run_m1`, not `PerfRecorder` | `coverage` is appended *after* `save()`, so a crash before that line loses it | Acceptable; note it if you resume a partial run |
-| 6 | `m1_download` retry paths untested | Backoff bugs surface only in production runs | Add a test with a fake session returning 503, asserting `MAX_RETRIES` attempts |
+**External wrapper benchmark (alternative via `benchmark.py` CLI):**
 
----
-
-## 4. Reading Guide
-
-- Want to know **what is tested** → §1.3.
-- Want to know **what is not** → §1.5 and §3.
-- Want to **produce the M1 report numbers** → §2.1, §2.2, §2.7.
-- Want to know **why a size number looks wrong** → §2.6.
-- Want to know **why disk numbers are estimates** → §2.3.
+```powershell
+python src/utils/benchmark.py --milestone m2 --watch data/corpus -- python src/run_m2.py --corpus-dir data/corpus
+```
 
 ---
 
-## 5. Team Review
+## 7. Reading Guide for Students
 
-- **Author:** P4 (owns `utils/benchmark.py` and the Parquet/export layer)
-- **Reviewer:** P1 (M1 report lead) and the Jupyter Book owner
-- **Design decisions:** Two-thread monitor (RAM and disk separated) so a slow Colab Drive scan never delays RAM sampling. Process-tree RSS rather than single-process, to match "total memory consumed by the full system". Per-version size recording with explicit PDF-only flagging, to satisfy "keep an empty record rather than dropping the publication".
-- **Open questions:** Should M2 get first-class `PerfRecorder` support, or is the CLI wrapper enough? Who owns the benchmark numbers in the Jupyter Book — P1 (M1) or the report lead?
+- **To run unit tests:** Use `python -m pytest src/tests -q --no-header`.
+- **To understand what the lab report requires:** Read §4.1 and §4.2.
+- **To understand RAM and Disk measurement:** Read §4.3.
+- **To explain Colab multi-session numbers in your report:** Read §5.1 and §5.2.
+- **To understand before/after paper size definitions:** See [04_m2_parsing.md](./04_m2_parsing.md) and `inspect_archive_bytes()` in `benchmark.py`.
+
+---
+
+## 8. Team Review & Sign-Off
+
+- **Authors:** P4 (benchmark and schemas lead) & P1 (crawler and test lead)
+- **Review Status:** Verified (`164 passed` across all 10 test files).
+- **Remaining Action Items for Team:**
+  1. Add unit tests for `src/utils/benchmark.py`, `src/crawler/m1_tables.py`, and `src/crawler/m1_aggregate.py`.
+  2. Add tests for M3 modules as they move from skeleton to implementation (`m3_auto_labeler.py`, `m3_model.py`, `m3_evaluate.py`).
+
