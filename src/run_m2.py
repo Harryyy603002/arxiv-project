@@ -46,6 +46,14 @@ _BIB_NAMES_RE = re.compile(r"\\bibliography\s*\{([^}]*)\}|\\addbibresource\s*(?:
 def log(message: str) -> None:
     print(message, flush=True)
 
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(max(seconds, 0))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
 
 # ----------------------------------------------------------------------------- tiện ích
 def _atomic_json(path: Path, payload: object) -> None:
@@ -262,6 +270,18 @@ def _select_papers(root: Path, ids: Optional[List[str]], limit: Optional[int]) -
     return papers[:limit] if limit else papers
 
 
+def _completed_steps(paper_dir: Path) -> set[str]:
+    """Bước nào của bài đã có đầu ra trên đĩa (dùng cho --skip-existing)."""
+    done = set()
+    if (paper_dir / "m2_stats.json").exists():
+        done.add("bib")
+    if (paper_dir / "elements.json").exists():
+        done.add("content")
+    vdirs = version_dirs(paper_dir)
+    if vdirs and all((v / "tree_raw.json").exists() for v in vdirs):
+        done.add("tree")
+    return done
+
 def run(corpus_dir: Path | None = None, steps=ALL_STEPS, ids: Optional[List[str]] = None,
         limit: Optional[int] = None, skip_existing: bool = False, export: bool = False,
         bench_dir: Optional[Path] = None) -> list[dict]:
@@ -269,66 +289,117 @@ def run(corpus_dir: Path | None = None, steps=ALL_STEPS, ids: Optional[List[str]
     C.DATA_DIR = root  # các module parser đọc đường dẫn qua utils.config
     C.LOGS_DIR = root / "logs"
     papers = _select_papers(root, ids, limit)
-    log(f"[m2] {len(papers)} bài, các bước: {', '.join(steps)}")
+    started = time.perf_counter()
+    log(f"[m2] corpus={root}")
+    log(f"[m2] {len(papers)} bài, các bước: {', '.join(steps)}"
+        f"{', skip-existing' if skip_existing else ''}{', export' if export else ''}")
+    if limit and skip_existing:
+        log("[m2] LƯU Ý: --limit áp dụng TRƯỚC --skip-existing, nên số bài thực sự xử lý có thể ít hơn "
+            f"{limit}; dùng --ids hoặc tăng --limit nếu cần đúng số lượng.")
     results: List[dict] = []
     export_counts: dict = {}
+    skipped = failed = processed = 0
 
     with PerfRecorder("m2", watch_dirs=[root]) as rec:
         for index, paper_dir in enumerate(papers, start=1):
             arxiv_id = paper_arxiv_id(paper_dir)
-            if skip_existing and (paper_dir / "m2_stats.json").exists() and (paper_dir / "elements.json").exists():
-                continue
+            if skip_existing:
+                done = _completed_steps(paper_dir)
+                missing = [step for step in steps if step not in done]
+                if not missing:
+                    skipped += 1
+                    log(f"[m2] {index}/{len(papers)} {arxiv_id} SKIP (đã có {', '.join(steps)})")
+                    continue
             entry: dict = {"paper": paper_dir.name, "arxiv_id": arxiv_id}
             ok = True
+            detail: List[str] = []
+            paper_started = time.perf_counter()
             with rec.paper(arxiv_id):
                 try:
                     if "bib" in steps:
-                        started = time.perf_counter()
+                        stage_started = time.perf_counter()
                         stats = process_paper(paper_dir)
-                        rec.add_stage_time("bib", time.perf_counter() - started)
+                        rec.add_stage_time("bib", time.perf_counter() - stage_started)
                         entry.update(stats)
                         rec.record_dedup(arxiv_id, "bibtex", stats["bibtex_entries_ingested"],
                                          stats["canonical_entries"])
+                        detail.append(f"bib={stats['bibtex_entries_ingested']}→{stats['canonical_entries']}")
+                        detail.append(f"refs={stats['references_with_arxiv_id']}/{stats['references_ingested']}")
+                        detail.append(f"cand={stats['candidate_pairs']}")
                     if "tree" in steps:
-                        started = time.perf_counter()
+                        stage_started = time.perf_counter()
                         statuses = H.process_paper(arxiv_id)
-                        rec.add_stage_time("tree", time.perf_counter() - started)
+                        rec.add_stage_time("tree", time.perf_counter() - stage_started)
                         entry["tree_statuses"] = dict(statuses)
                         ok = not any(s in {"no_root", "error"} for _, s in statuses)
+                        detail.append("tree=" + (",".join(f"{v}:{s}" for v, s in statuses) or "none"))
                     if "content" in steps:
-                        started = time.perf_counter()
+                        stage_started = time.perf_counter()
                         summary = D.process_paper(arxiv_id)
-                        rec.add_stage_time("content", time.perf_counter() - started)
+                        rec.add_stage_time("content", time.perf_counter() - stage_started)
                         entry["parse"] = {k: summary[k] for k in (
                             "n_versions", "n_versions_ok", "n_nodes_before_dedup", "n_elements_after_dedup")}
                         entry["version_status"] = {k: v["status"] for k, v in summary["versions"].items()}
                         rec.record_dedup(arxiv_id, "elements", summary["n_nodes_before_dedup"],
                                          summary["n_elements_after_dedup"])
+                        detail.append(f"content={summary['n_versions_ok']}/{summary['n_versions']}")
+                        detail.append(f"el={summary['n_nodes_before_dedup']}→{summary['n_elements_after_dedup']}")
                 except Exception as error:  # noqa: BLE001 - một bài lỗi không làm dừng cả lượt
                     ok = False
                     entry["error"] = f"{type(error).__name__}: {error}"
-                    log(f"[m2] LỖI {arxiv_id}: {entry['error']}")
+                    detail.append(f"LỖI {entry['error']}")
             rec.record_result(arxiv_id, ok)
             results.append(entry)
-            if index % 100 == 0 or index == len(papers):
-                log(f"[m2] {index}/{len(papers)}")
+            processed += 1
+            failed += int(not ok)
+            log(f"[m2] {index}/{len(papers)} {arxiv_id} {' '.join(detail)} "
+                f"t={time.perf_counter() - paper_started:.2f}s ok={ok}")
+            if processed % 100 == 0:
+                elapsed = time.perf_counter() - started
+                rate = processed / elapsed if elapsed else 0.0
+                remaining = len(papers) - index
+                eta = remaining / rate if rate else 0.0
+                log(f"[m2] tiến độ {index}/{len(papers)}: đã xử lý {processed}, skip {skipped}, lỗi {failed}, "
+                    f"{rate:.2f} bài/s, còn ~{_fmt_duration(eta)}")
         if export:
             with rec.stage("export"):
                 export_counts = export_m2_parquet(corpus_dir=root, out_dir=root / "export")
+            log(f"[m2] export: {export_counts}")
 
-    _atomic_json(root / "m2_stats.json", results)
+    aggregate = results
+    if skip_existing:
+        # Giữ lại số liệu của các bài bị bỏ qua, nếu không m2_stats.json sẽ mất dữ liệu của lượt trước.
+        previous = _read_json(root / "m2_stats.json")
+        if isinstance(previous, list):
+            merged = {e.get("arxiv_id"): e for e in previous if isinstance(e, dict) and e.get("arxiv_id")}
+            merged.update({entry["arxiv_id"]: entry for entry in results})
+            aggregate = list(merged.values())
+    _atomic_json(root / "m2_stats.json", aggregate)
     out_dir = Path(bench_dir) if bench_dir else root / "benchmark"
     out_dir.mkdir(parents=True, exist_ok=True)
+    summary = rec.summary()
     rec.save(out_dir / "m2_benchmark.json", extra={
-        "n_papers": len(results), "steps": list(steps), "export": export_counts,
-        "parse_success_rate": rec.summary().get("success_rate"), **m2_output_bytes(root)})
+        "n_papers": len(results), "n_skipped": skipped, "n_failed": failed,
+        "steps": list(steps), "export": export_counts,
+        "parse_success_rate": summary.get("success_rate"), **m2_output_bytes(root)})
     
     # Lưu bộ đếm unknown_commands
     from parser import m2_cleanup as cleanup
     num_cmds, num_total = cleanup.save_unknown_commands_stats(str(out_dir / "unknown_commands.json"))
     if num_cmds > 0:
         log(f"[m2] Đã ghi {num_cmds} lệnh lạ ({num_total} lần xuất hiện) vào {out_dir / 'unknown_commands.json'}")
-    
+
+    log(f"[m2] XONG {len(papers)} bài trong {_fmt_duration(time.perf_counter() - started)}: "
+        f"xử lý {processed}, skip {skipped}, lỗi {failed}")
+    if summary.get("stages_s"):
+        log("[m2] thời gian theo bước: "
+            + ", ".join(f"{k}={v:.1f}s" for k, v in summary["stages_s"].items()))
+    if summary.get("dedup"):
+        log("[m2] khử trùng: " + ", ".join(
+            f"{kind} {v['before']}→{v['after']} (-{v['reduction_pct']}%)" if v.get("reduction_pct") is not None
+            else f"{kind} {v['before']}→{v['after']}"
+            for kind, v in summary["dedup"].items()))
+    log(f"[m2] kết quả: {root / 'm2_stats.json'}, benchmark: {out_dir / 'm2_benchmark.json'}")
     return results
 
 
@@ -338,7 +409,9 @@ def main(argv=None) -> None:
     ap.add_argument("--steps", default=",".join(ALL_STEPS), help="bib,tree,content (mặc định cả ba, theo thứ tự này)")
     ap.add_argument("--ids", nargs="*", help="chỉ xử lý các arXiv ID này")
     ap.add_argument("--limit", type=int, help="chỉ xử lý N bài đầu")
-    ap.add_argument("--skip-existing", action="store_true", help="bỏ qua bài đã có m2_stats.json và elements.json")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="bỏ qua bài đã xong mọi bước được yêu cầu (có m2_stats.json, tree_raw.json của mọi "
+                         "version và elements.json)")
     ap.add_argument("--export", action="store_true", help="xuất elements/hierarchy/bibtex.parquet vào <corpus>/export")
     ap.add_argument("--export-only", action="store_true",
                     help="chỉ xuất Parquet từ kết quả đã có (không parse lại, không ghi đè benchmark)")

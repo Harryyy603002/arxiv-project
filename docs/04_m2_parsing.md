@@ -580,9 +580,19 @@ run(corpus_dir=None, steps=ALL_STEPS, ids=None, limit=None,
 - **One paper's exception never stops the run** — it is caught, stored as
   `entry["error"] = "TypeName: message"`, and `ok` becomes `False`. The
   `tree` step additionally marks failure for `no_root`/`error` statuses.
-- `--skip-existing` skips a paper only when **both** `m2_stats.json` and
-  `elements.json` exist.
-- Progress logs every 100 papers; ends with `n_papers` / `steps` /
+- `--skip-existing` skips a paper only when **every requested step already has
+  its output on disk** (`_completed_steps`): `bib` → `m2_stats.json`,
+  `tree` → `tree_raw.json` for **all** versions, `content` → `elements.json`.
+  A paper missing any of them is reprocessed. Skipped papers are counted and
+  logged (`SKIP`), and their rows are preserved in the aggregate `m2_stats.json`
+  instead of being dropped.
+- `--limit` is applied **before** `--skip-existing`, so `--limit N` may process
+  fewer than N new papers; the run warns about this combination.
+- Logging: one line per paper
+  (`<index>/<n> <id> bib=<ingested>→<canonical> refs=<with_arxiv>/<all> cand=<pairs> tree=<v:status,...> content=<ok>/<all> el=<before>→<after> t=<s> ok=<bool>`),
+  a progress line every 100 processed papers with rate + ETA, and a summary
+  (processed/skipped/failed, per-stage seconds, dedup before→after, output paths).
+  The benchmark file still ends with `n_papers` / `steps` /
   `parse_success_rate` / `m2_output_bytes`.
 
 **Two aggregate outputs at the corpus root:**

@@ -223,3 +223,34 @@ def test_run_m2_end_to_end(corpus):
     assert bench["export_parquet_bytes"] > 0 and bench["m2_output_bytes"] >= bench["export_parquet_bytes"]
     from utils.benchmark import dir_size
     assert 0 < bench["m2_output_bytes"] < dir_size(corpus)  # chỉ phần M2, không gồm .tex/.bib/paper.json của M1
+
+def test_skip_existing_skips_processed_papers_and_reprocesses_incomplete(corpus):
+    pytest.importorskip("pyarrow")
+
+    first = run_m2.run(corpus)
+    assert {r["arxiv_id"] for r in first} == {"2602.04870", "hep-th/9901001", "2602.00003"}
+
+    # lượt 2: mọi bài đã xong -> không xử lý lại bài nào, và m2_stats.json tổng hợp không bị xóa trắng
+    assert run_m2.run(corpus, skip_existing=True) == []
+    aggregate = json.loads((corpus / "m2_stats.json").read_text(encoding="utf-8"))
+    assert {e["arxiv_id"] for e in aggregate} == {"2602.04870", "hep-th/9901001", "2602.00003"}
+
+    # xóa đầu ra của MỘT bài -> chỉ bài đó được xử lý lại
+    pdir = C.paper_dir("2602.04870")
+    (pdir / "elements.json").unlink()
+    second = run_m2.run(corpus, skip_existing=True)
+    assert [r["arxiv_id"] for r in second] == ["2602.04870"]
+    assert (pdir / "elements.json").exists()
+    assert len(json.loads((corpus / "m2_stats.json").read_text(encoding="utf-8"))) == 3
+
+    # thiếu tree_raw.json của một version cũng phải bị coi là chưa xong (m2_stats + elements vẫn còn)
+    (pdir / "v2" / "tree_raw.json").unlink()
+    third = run_m2.run(corpus, skip_existing=True)
+    assert [r["arxiv_id"] for r in third] == ["2602.04870"]
+    assert (pdir / "v2" / "tree_raw.json").exists()
+
+    # thiếu tree_raw.json của một version cũng phải bị coi là chưa xong (m2_stats + elements vẫn còn)
+    (pdir / "v2" / "tree_raw.json").unlink()
+    third = run_m2.run(corpus, skip_existing=True)
+    assert [r["arxiv_id"] for r in third] == ["2602.04870"]
+    assert (pdir / "v2" / "tree_raw.json").exists()

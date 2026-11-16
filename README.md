@@ -371,7 +371,8 @@ python src/run_m2.py --steps content
 # Chỉ chạy thử trên một vài ID bài báo cụ thể:
 python src/run_m2.py --ids 2310.12345 2606.20734
 
-# Bỏ qua những bài đã có m2_stats.json và elements.json (chạy tiếp tục khi bị dừng):
+# Bỏ qua bài đã xong cả 3 bước (chạy tiếp tục khi bị dừng). Bài thiếu bất kỳ đầu ra nào
+# (m2_stats.json / tree_raw.json của mọi version / elements.json) sẽ được xử lý lại:
 python src/run_m2.py --skip-existing
 ```
 
