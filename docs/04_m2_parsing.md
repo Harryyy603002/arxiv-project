@@ -514,6 +514,7 @@ python src/run_m2.py                                   # all three steps, every 
 python src/run_m2.py --steps bib                       # BibTeX + candidates only
 python src/run_m2.py --steps tree,content              # LaTeX parsing only
 python src/run_m2.py --ids 2602.04870 --limit 5
+python src/run_m2.py --workers 8                       # override multiprocessing concurrency
 python src/run_m2.py --export                          # ...then write the Parquet tables
 python src/run_m2.py --export-only                     # skip parsing, only export
 ```

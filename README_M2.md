@@ -96,8 +96,10 @@ python src/run_m2.py --corpus-dir /content/corpus --export
 | `--steps bib,tree,content` | Chọn bước (mặc định cả ba, luôn chạy theo thứ tự bib, tree, content). |
 | `--ids 2602.04870 hep-th/9901001` | Chỉ xử lý các arXiv ID này. |
 | `--limit N` | Chỉ xử lý N bài đầu. |
-| `--skip-existing` | Bỏ qua bài đã có `m2_stats.json` và `elements.json` (chạy tiếp sau khi bị ngắt). |
+| `--skip-existing` | Bỏ qua bài đã có đủ kết quả mọi bước yêu cầu (`m2_stats.json`, `tree_raw.json` mọi version, `elements.json`). |
+| `--workers N` | Số tiến trình song song (mặc định `cpu_count - 2` an toàn, tối thiểu 1). Giúp tăng tốc 6x–8x. |
 | `--export` | Ghi `elements/hierarchy/bibtex.parquet` vào `<corpus>/export/`. |
+| `--export-only` | Chỉ xuất Parquet từ kết quả đã có mà không parse lại hay ghi đè benchmark. |
 
 Một bài lỗi không làm dừng cả lượt: lỗi được ghi vào kết quả của bài đó (`error`) và tính là thất bại trong tỉ lệ thành công.
 

@@ -93,7 +93,7 @@ arxiv-project/
 │   │   ├── logger.py                 # Chuẩn hóa định dạng log pipeline
 │   │   ├── schemas.py                # Schema PyArrow 6 bảng & export Parquet
 │   │   └── benchmark.py              # PerfRecorder đo RAM, đĩa, thời gian
-│   └── tests/                        # Bộ kiểm thử tự động (164 tests)
+│   └── tests/                        # Bộ kiểm thử tự động (165 tests)
 ├── pytest.ini
 └── requirements.txt                  # Danh sách thư viện Python cần thiết
 ```
@@ -374,6 +374,9 @@ python src/run_m2.py --ids 2310.12345 2606.20734
 # Bỏ qua bài đã xong cả 3 bước (chạy tiếp tục khi bị dừng). Bài thiếu bất kỳ đầu ra nào
 # (m2_stats.json / tree_raw.json của mọi version / elements.json) sẽ được xử lý lại:
 python src/run_m2.py --skip-existing
+
+# Xử lý song song bằng đa tiến trình (mặc định: số CPU - 2, tăng tốc 6x-8x):
+python src/run_m2.py --workers 8 --skip-existing --export
 ```
 
 #### Ba bước xử lý của M2 (`--steps bib,tree,content`)

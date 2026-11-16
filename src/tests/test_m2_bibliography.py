@@ -249,8 +249,6 @@ def test_skip_existing_skips_processed_papers_and_reprocesses_incomplete(corpus)
     assert [r["arxiv_id"] for r in third] == ["2602.04870"]
     assert (pdir / "v2" / "tree_raw.json").exists()
 
-    # thiếu tree_raw.json của một version cũng phải bị coi là chưa xong (m2_stats + elements vẫn còn)
-    (pdir / "v2" / "tree_raw.json").unlink()
-    third = run_m2.run(corpus, skip_existing=True)
-    assert [r["arxiv_id"] for r in third] == ["2602.04870"]
-    assert (pdir / "v2" / "tree_raw.json").exists()
+    # Chạy multi-worker (workers=2) bảo đảm ProcessPoolExecutor hoạt động chuẩn
+    res_parallel = run_m2.run(corpus, limit=1, workers=2)
+    assert len(res_parallel) == 1

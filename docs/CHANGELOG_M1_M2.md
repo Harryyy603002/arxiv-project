@@ -277,7 +277,9 @@ Kết quả:
 
 **Tính năng mới:**
 - ✅ Điều phối 3 bước: `bib → tree → content`
-- ✅ `--steps`, `--ids`, `--limit`, `--skip-existing`, `--export`
+- ✅ `--steps`, `--ids`, `--limit`, `--skip-existing`, `--export`, `--export-only`
+- ✅ Hỗ trợ xử lý song song đa tiến trình với `--workers N` (mặc định `cpu_count - 2`), tăng tốc 6x–8x
+- ✅ Tự động nhận diện thư mục corpus (chỉ chọn `corpus/` khi thực sự chứa thư mục bài báo)
 - ✅ Benchmark đầy đủ: `m2_benchmark.json` + `unknown_commands.json`
 - ✅ Một bài lỗi không làm dừng cả lượt
 

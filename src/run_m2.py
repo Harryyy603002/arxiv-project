@@ -19,13 +19,15 @@ Log hiệu năng: <corpus>/benchmark/m2_benchmark.json.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
+import os
 import re
 import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from matching.m3_candidates import generate_candidates, normalize_authors, normalize_text  # noqa: E402
@@ -71,7 +73,13 @@ def _read_json(path: Path):
 
 def _corpus_dir() -> Path:
     candidate = C.DATA_DIR / "corpus"
-    return candidate if candidate.exists() else C.DATA_DIR
+    # Only use corpus/ if it actually contains paper subdirectories
+    if candidate.exists() and any(
+        (d / "paper.json").exists() or any(c.is_dir() and _VERSION_DIR_RE.match(c.name) for c in d.iterdir())
+        for d in candidate.iterdir() if d.is_dir()
+    ):
+        return candidate
+    return C.DATA_DIR
 
 
 def paper_arxiv_id(paper_dir: Path) -> str:
@@ -282,16 +290,88 @@ def _completed_steps(paper_dir: Path) -> set[str]:
         done.add("tree")
     return done
 
+def _worker_init(root_dir: str) -> None:
+    """Khởi tạo tiến trình worker: đặt C.DATA_DIR để các hàm parser định tuyến đúng file."""
+    p = Path(root_dir)
+    C.DATA_DIR = p
+    C.LOGS_DIR = p / "logs"
+
+
+def _process_one_paper(
+    paper_dir: Path,
+    steps: Tuple[str, ...],
+) -> dict:
+    """Xử lý độc lập một bài báo trong process worker."""
+    arxiv_id = paper_arxiv_id(paper_dir)
+    entry: dict = {"paper": paper_dir.name, "arxiv_id": arxiv_id}
+    ok = True
+    detail: List[str] = []
+    stage_times: Dict[str, float] = {}
+    dedup_records: List[Tuple[str, int, int]] = []
+    paper_started = time.perf_counter()
+
+    try:
+        if "bib" in steps:
+            s_t = time.perf_counter()
+            stats = process_paper(paper_dir)
+            stage_times["bib"] = time.perf_counter() - s_t
+            entry.update(stats)
+            dedup_records.append(("bibtex", stats["bibtex_entries_ingested"], stats["canonical_entries"]))
+            detail.append(f"bib={stats['bibtex_entries_ingested']}→{stats['canonical_entries']}")
+            detail.append(f"refs={stats['references_with_arxiv_id']}/{stats['references_ingested']}")
+            detail.append(f"cand={stats['candidate_pairs']}")
+        if "tree" in steps:
+            s_t = time.perf_counter()
+            statuses = H.process_paper(arxiv_id)
+            stage_times["tree"] = time.perf_counter() - s_t
+            entry["tree_statuses"] = dict(statuses)
+            ok = not any(s in {"no_root", "error"} for _, s in statuses)
+            detail.append("tree=" + (",".join(f"{v}:{s}" for v, s in statuses) or "none"))
+        if "content" in steps:
+            s_t = time.perf_counter()
+            summary = D.process_paper(arxiv_id)
+            stage_times["content"] = time.perf_counter() - s_t
+            entry["parse"] = {
+                k: summary[k] for k in (
+                    "n_versions", "n_versions_ok", "n_nodes_before_dedup", "n_elements_after_dedup"
+                )
+            }
+            entry["version_status"] = {k: v["status"] for k, v in summary["versions"].items()}
+            dedup_records.append(("elements", summary["n_nodes_before_dedup"], summary["n_elements_after_dedup"]))
+            detail.append(f"content={summary['n_versions_ok']}/{summary['n_versions']}")
+            detail.append(f"el={summary['n_nodes_before_dedup']}→{summary['n_elements_after_dedup']}")
+    except Exception as error:  # noqa: BLE001 - một bài lỗi không làm dừng cả lượt
+        ok = False
+        entry["error"] = f"{type(error).__name__}: {error}"
+        detail.append(f"LỖI {entry['error']}")
+
+    total_s = time.perf_counter() - paper_started
+    return {
+        "entry": entry,
+        "ok": ok,
+        "detail": " ".join(detail),
+        "total_s": total_s,
+        "stage_times": stage_times,
+        "dedup_records": dedup_records,
+        "arxiv_id": arxiv_id,
+    }
+
+
 def run(corpus_dir: Path | None = None, steps=ALL_STEPS, ids: Optional[List[str]] = None,
         limit: Optional[int] = None, skip_existing: bool = False, export: bool = False,
-        bench_dir: Optional[Path] = None) -> list[dict]:
+        bench_dir: Optional[Path] = None, workers: Optional[int] = None) -> list[dict]:
     root = Path(corpus_dir or _corpus_dir()).expanduser().resolve()
     C.DATA_DIR = root  # các module parser đọc đường dẫn qua utils.config
     C.LOGS_DIR = root / "logs"
     papers = _select_papers(root, ids, limit)
     started = time.perf_counter()
+
+    if workers is None:
+        cpu = os.cpu_count() or 1
+        workers = max(1, cpu - 2) if cpu > 4 else max(1, cpu - 1)
+
     log(f"[m2] corpus={root}")
-    log(f"[m2] {len(papers)} bài, các bước: {', '.join(steps)}"
+    log(f"[m2] {len(papers)} bài, các bước: {', '.join(steps)}, workers={workers}"
         f"{', skip-existing' if skip_existing else ''}{', export' if export else ''}")
     if limit and skip_existing:
         log("[m2] LƯU Ý: --limit áp dụng TRƯỚC --skip-existing, nên số bài thực sự xử lý có thể ít hơn "
@@ -301,66 +381,53 @@ def run(corpus_dir: Path | None = None, steps=ALL_STEPS, ids: Optional[List[str]
     skipped = failed = processed = 0
 
     with PerfRecorder("m2", watch_dirs=[root]) as rec:
+        to_process: List[Path] = []
         for index, paper_dir in enumerate(papers, start=1):
-            arxiv_id = paper_arxiv_id(paper_dir)
             if skip_existing:
                 done = _completed_steps(paper_dir)
                 missing = [step for step in steps if step not in done]
                 if not missing:
                     skipped += 1
+                    arxiv_id = paper_arxiv_id(paper_dir)
                     log(f"[m2] {index}/{len(papers)} {arxiv_id} SKIP (đã có {', '.join(steps)})")
                     continue
-            entry: dict = {"paper": paper_dir.name, "arxiv_id": arxiv_id}
-            ok = True
-            detail: List[str] = []
-            paper_started = time.perf_counter()
-            with rec.paper(arxiv_id):
-                try:
-                    if "bib" in steps:
-                        stage_started = time.perf_counter()
-                        stats = process_paper(paper_dir)
-                        rec.add_stage_time("bib", time.perf_counter() - stage_started)
-                        entry.update(stats)
-                        rec.record_dedup(arxiv_id, "bibtex", stats["bibtex_entries_ingested"],
-                                         stats["canonical_entries"])
-                        detail.append(f"bib={stats['bibtex_entries_ingested']}→{stats['canonical_entries']}")
-                        detail.append(f"refs={stats['references_with_arxiv_id']}/{stats['references_ingested']}")
-                        detail.append(f"cand={stats['candidate_pairs']}")
-                    if "tree" in steps:
-                        stage_started = time.perf_counter()
-                        statuses = H.process_paper(arxiv_id)
-                        rec.add_stage_time("tree", time.perf_counter() - stage_started)
-                        entry["tree_statuses"] = dict(statuses)
-                        ok = not any(s in {"no_root", "error"} for _, s in statuses)
-                        detail.append("tree=" + (",".join(f"{v}:{s}" for v, s in statuses) or "none"))
-                    if "content" in steps:
-                        stage_started = time.perf_counter()
-                        summary = D.process_paper(arxiv_id)
-                        rec.add_stage_time("content", time.perf_counter() - stage_started)
-                        entry["parse"] = {k: summary[k] for k in (
-                            "n_versions", "n_versions_ok", "n_nodes_before_dedup", "n_elements_after_dedup")}
-                        entry["version_status"] = {k: v["status"] for k, v in summary["versions"].items()}
-                        rec.record_dedup(arxiv_id, "elements", summary["n_nodes_before_dedup"],
-                                         summary["n_elements_after_dedup"])
-                        detail.append(f"content={summary['n_versions_ok']}/{summary['n_versions']}")
-                        detail.append(f"el={summary['n_nodes_before_dedup']}→{summary['n_elements_after_dedup']}")
-                except Exception as error:  # noqa: BLE001 - một bài lỗi không làm dừng cả lượt
-                    ok = False
-                    entry["error"] = f"{type(error).__name__}: {error}"
-                    detail.append(f"LỖI {entry['error']}")
+            to_process.append(paper_dir)
+
+        def _apply_result(res: dict, idx: int) -> None:
+            nonlocal processed, failed
+            entry = res["entry"]
+            ok = res["ok"]
+            arxiv_id = res["arxiv_id"]
+            rec.add_paper_time(arxiv_id, res["total_s"])
+            for st, dt in res["stage_times"].items():
+                rec.add_stage_time(st, dt)
+            for kind, b, a in res["dedup_records"]:
+                rec.record_dedup(arxiv_id, kind, b, a)
             rec.record_result(arxiv_id, ok)
             results.append(entry)
             processed += 1
             failed += int(not ok)
-            log(f"[m2] {index}/{len(papers)} {arxiv_id} {' '.join(detail)} "
-                f"t={time.perf_counter() - paper_started:.2f}s ok={ok}")
+            log(f"[m2] {idx}/{len(papers)} {arxiv_id} {res['detail']} "
+                f"t={res['total_s']:.2f}s ok={ok}")
             if processed % 100 == 0:
                 elapsed = time.perf_counter() - started
                 rate = processed / elapsed if elapsed else 0.0
-                remaining = len(papers) - index
+                remaining = len(papers) - (skipped + processed)
                 eta = remaining / rate if rate else 0.0
-                log(f"[m2] tiến độ {index}/{len(papers)}: đã xử lý {processed}, skip {skipped}, lỗi {failed}, "
-                    f"{rate:.2f} bài/s, còn ~{_fmt_duration(eta)}")
+                log(f"[m2] tiến độ {skipped + processed}/{len(papers)}: đã xử lý {processed}, skip {skipped}, "
+                    f"lỗi {failed}, {rate:.2f} bài/s, còn ~{_fmt_duration(eta)}")
+
+        if workers == 1:
+            for i, pdir in enumerate(to_process, start=skipped + 1):
+                res = _process_one_paper(pdir, steps)
+                _apply_result(res, i)
+        else:
+            with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(str(root),)) as pool:
+                futures = {pool.submit(_process_one_paper, pdir, steps): pdir for pdir in to_process}
+                for i, fut in enumerate(as_completed(futures), start=skipped + 1):
+                    res = fut.result()
+                    _apply_result(res, i)
+
         if export:
             with rec.stage("export"):
                 export_counts = export_m2_parquet(corpus_dir=root, out_dir=root / "export")
@@ -415,6 +482,8 @@ def main(argv=None) -> None:
     ap.add_argument("--export", action="store_true", help="xuất elements/hierarchy/bibtex.parquet vào <corpus>/export")
     ap.add_argument("--export-only", action="store_true",
                     help="chỉ xuất Parquet từ kết quả đã có (không parse lại, không ghi đè benchmark)")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="số worker tiến trình song song (mặc định: cpu_count - 2 để tránh nghẽn máy)")
     args = ap.parse_args(argv)
     if args.export_only:
         root = Path(args.corpus_dir or _corpus_dir()).expanduser().resolve()
@@ -422,7 +491,7 @@ def main(argv=None) -> None:
         log(f"[m2] đã xuất vào {root / 'export'}: {counts}")
         return
     steps = tuple(s for s in ALL_STEPS if s in {x.strip() for x in args.steps.split(",")})
-    run(args.corpus_dir, steps, args.ids, args.limit, args.skip_existing, args.export)
+    run(args.corpus_dir, steps, args.ids, args.limit, args.skip_existing, args.export, workers=args.workers)
 
 
 if __name__ == "__main__":
