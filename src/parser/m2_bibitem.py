@@ -6,57 +6,94 @@ import re
 from typing import Iterable
 
 _ENTRY_START = re.compile(r"@(?P<entry_type>[A-Za-z]+)\s*[{(]\s*(?P<key>[^,\s]+)\s*,")
-_FIELD_START = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9_-]*)\s*=")
+_ENTRY_OPEN = re.compile(r"@[A-Za-z]+\s*[{(]")
+_NEXT_ENTRY_LINE = re.compile(r"^[ \t]*@[A-Za-z]+\s*[{(]", re.M)
+_FIELD_START = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9_-]*)\s*=\s*")
+_BRACE_TOKEN = re.compile(r"\\.|[{}]", re.S)          # ký tự escape (\\", \\{...) được bỏ qua
+_QUOTE_TOKEN = re.compile(r"\\.|[{}\"]", re.S)
+_WS = re.compile(r"\s*")
 
 
 def _balanced_entries(text: str) -> Iterable[str]:
-    for match in re.finditer(r"@[A-Za-z]+\s*[{(]", text):
+    """Tách từng entry @type{...} trong MỘT lượt quét (tuyến tính theo độ dài văn bản).
+
+    Chỉ đếm ngoặc nhọn (dấu " bên trong {...} không có nghĩa, và \\" là dấu thanh LaTeX chứ không
+    phải ký tự mở chuỗi). Entry mất cân bằng ngoặc không được phép "nuốt" phần còn lại của file:
+    nó bị cắt tại dòng bắt đầu bằng @type{ kế tiếp. Quét tiếp từ cuối entry, không quét lại từ đầu.
+    """
+    pos, n = 0, len(text)
+    while True:
+        match = _ENTRY_OPEN.search(text, pos)
+        if not match:
+            return
         opening = text[match.end() - 1]
-        closing = "}" if opening == "{" else ")"
-        depth = 0
-        quoted = False
-        escaped = False
-        for index in range(match.end() - 1, len(text)):
-            char = text[index]
-            if quoted and char == '"' and not escaped:
-                quoted = False
-            elif not quoted and char == '"' and depth > 0:
-                quoted = True
-            elif not quoted and char == opening:
+        nxt = _NEXT_ENTRY_LINE.search(text, match.end())
+        limit = nxt.start() if nxt else n
+        depth = 1 if opening == "{" else 0      # entry kiểu @x( ... ) kết thúc ở ")" ngoài mọi {}
+        end = None
+        for token in _BRACE_TOKEN.finditer(text, match.end(), limit):
+            char = token.group(0)
+            if char == "{":
                 depth += 1
-            elif not quoted and char == closing:
+            elif char == "}":
                 depth -= 1
-                if depth == 0:
-                    yield text[match.start():index + 1]
+                if depth == 0 and opening == "{":
+                    end = token.end()
                     break
-            escaped = char == "\\" and not escaped
-            if char != "\\":
-                escaped = False
+        if opening == "(" and end is None:
+            close = text.find(")", match.end(), limit)
+            end = close + 1 if close != -1 else None
+        if end is not None:
+            yield text[match.start():end]
+            pos = end
+        else:                                    # entry hỏng: lấy đến trước entry kế, tự đóng ngoặc
+            yield text[match.start():limit].rstrip() + ("}" if opening == "{" else ")")
+            pos = max(limit, match.end())
 
 
 def _value_end(text: str, start: int) -> int:
-    if start >= len(text):
-        return start
-    if text[start] == "{":
-        depth = 0
-        for index in range(start, len(text)):
-            if text[index] == "{":
-                depth += 1
-            elif text[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    return index + 1
-        return len(text)
-    if text[start] == '"':
-        index = start + 1
-        while index < len(text):
-            if text[index] == '"' and text[index - 1] != "\\":
-                return index + 1
-            index += 1
-        return len(text)
-    return re.search(r",\s*[A-Za-z][A-Za-z0-9_-]*\s*=", text[start:]).start() + start if re.search(
-        r",\s*[A-Za-z][A-Za-z0-9_-]*\s*=", text[start:]
-    ) else len(text)
+    """Vị trí kết thúc của giá trị bắt đầu tại start (hỗ trợ {..}, "..", số/macro và nối bằng #)."""
+    n = len(text)
+    pos = start
+    while pos < n:
+        pos = _WS.match(text, pos).end()
+        if pos >= n:
+            return n
+        if text[pos] == "{":
+            depth = 0
+            for token in _BRACE_TOKEN.finditer(text, pos):
+                char = token.group(0)
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        pos = token.end()
+                        break
+            else:
+                return n
+        elif text[pos] == '"':
+            depth = 0
+            for token in _QUOTE_TOKEN.finditer(text, pos + 1):
+                char = token.group(0)
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                elif char == '"' and depth <= 0:
+                    pos = token.end()
+                    break
+            else:
+                return n
+        else:                                    # giá trị trần: 2020, jan, macro
+            comma = text.find(",", pos)
+            return comma if comma != -1 else n
+        after = _WS.match(text, pos).end()
+        if after < n and text[after] == "#":     # "a" # {b}: nối tiếp
+            pos = after + 1
+            continue
+        return pos
+    return n
 
 
 def _clean_value(value: str) -> str:
@@ -71,7 +108,7 @@ def _clean_value(value: str) -> str:
 
 def parse_bibtex_entries(text: str, arxiv_id: str | None = None,
                          version: int | None = None) -> list[dict]:
-    """Parse entries while preserving source and version provenance."""
+    """Parse entries while preserving source and version provenance (độ phức tạp tuyến tính)."""
     entries = []
     for raw in _balanced_entries(text):
         header = _ENTRY_START.search(raw)
@@ -79,11 +116,14 @@ def parse_bibtex_entries(text: str, arxiv_id: str | None = None,
             continue
         fields = {}
         body = raw[:-1]
-        body_start = header.end()
-        for field in _FIELD_START.finditer(body, body_start):
-            value_start = field.end()
-            value_end = _value_end(body, value_start)
-            fields[field.group("name").lower()] = _clean_value(body[value_start:value_end])
+        pos = header.end()
+        while pos < len(body):                   # đi tuần tự: mỗi trường bắt đầu SAU giá trị trước
+            field = _FIELD_START.search(body, pos)
+            if not field:
+                break
+            value_end = _value_end(body, field.end())
+            fields[field.group("name").lower()] = _clean_value(body[field.end():value_end])
+            pos = max(value_end, field.end())
         entry = {
             "citation_key": header.group("key").strip(),
             "entry_type": header.group("entry_type").lower(),
