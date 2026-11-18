@@ -1,18 +1,10 @@
-r"""m3_evaluate.py
-
-Milestone: M3
-Người phụ trách: P3
-Mục đích: Tính MRR@5 trên tập test
-
-Đầu vào: Top-5 ứng viên và nhãn thật
-Đầu ra:  Điểm MRR@5
-
-Ghi chú: dùng src/utils/config.py để tạo đường dẫn (paper_dir, version_dir).
-Nếu đổi định dạng đầu vào/đầu ra, cập nhật bảng "Thỏa thuận giao diện dữ liệu" trong README.
-"""
-
+"""M3 - P4: đánh giá xếp hạng bằng MRR@5."""
 from __future__ import annotations
 
+import argparse
+import json
+from collections import defaultdict
+from pathlib import Path
 from typing import Iterable, Optional
 
 K = 5
@@ -51,3 +43,50 @@ def mrr_at_k(
         "n_skipped_no_answer": skipped,
         "hit_rate": sum(s > 0 for s in scores) / n if n else 0.0,
     }
+
+
+def load_split(path: Path) -> dict:
+    """Đọc {"train": [arxiv_id...], "valid": [...], "test": [...]} -> {arxiv_id: tên tập}.
+
+    ĐỊNH DẠNG NÀY LÀ GIẢ ĐỊNH: xác nhận lại với P3 (labels_metadata.json).
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {aid: name for name, ids in data.items() for aid in ids}
+
+
+def mrr_by_group(rows, group_of, k: int = K) -> dict:
+    groups = defaultdict(list)
+    for row in rows:
+        groups[group_of(row)].append(row)
+    return {name: mrr_at_k(items, k) for name, items in sorted(groups.items())}
+
+
+def main() -> int:
+    import pandas as pd
+
+    parser = argparse.ArgumentParser(description="Tính MRR@5 từ predictions.parquet")
+    parser.add_argument("--predictions", type=Path, required=True)
+    parser.add_argument("--split-file", type=Path, help="JSON chia train/valid/test")
+    parser.add_argument("--keep-no-answer", action="store_true",
+                        help="tính cả entry không có đáp án (điểm 0)")
+    args = parser.parse_args()
+
+    rows = pd.read_parquet(args.predictions).to_dict("records")
+    for row in rows:
+        row["predicted_arxiv_ids"] = list(row["predicted_arxiv_ids"])
+        row["groundtruth_arxiv_id"] = row["groundtruth_arxiv_id"] or None
+
+    print("TỔNG:", mrr_at_k(rows, skip_no_answer=not args.keep_no_answer))
+    if args.split_file:
+        split = load_split(args.split_file)
+        by_split = mrr_by_group(
+            [r for r in rows if r["arxiv_id"] in split],
+            lambda r: split[r["arxiv_id"]],
+        )
+        for name, result in by_split.items():
+            print(f"{name:>6}:", result)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
