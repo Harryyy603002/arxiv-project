@@ -70,9 +70,9 @@ Full detail in [06 Integration](./06_integration.md) and [08 Development log](./
 
 | # | Defect | Severity | Impact |
 | --- | --- | --- | --- |
-| 1 | Redundant `v{N}/references.json` duplicated per version | 🟡 Medium | Disk space waste across thousands of versions |
-| 2 | `unknown_commands` counter in `m2_cleanup.py` never reset | 🟡 Low | Cumulative counts across multiple runs in same process |
-| 3 | Remaining M3 stubs (`m3_auto_labeler.py`, `m3_string_features.py`, `m3_context_features.py`) | 🟡 Medium | Skipped with fallback unless implemented by Tri/Nguyen |
+| 1 | Redundant `v{N}/references.json` duplicated per version | Medium | Disk space waste across thousands of versions |
+| 2 | `unknown_commands` counter in `m2_cleanup.py` never reset | Low | Cumulative counts across multiple runs in same process |
+| 3 | Remaining M3 stubs (`m3_auto_labeler.py`, `m3_string_features.py`, `m3_context_features.py`) | Medium | Skipped with fallback unless implemented by Tri/Nguyen |
 
 ---
 
