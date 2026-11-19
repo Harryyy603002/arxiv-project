@@ -81,19 +81,21 @@ arxiv-project/
 │   ├── matching/                     # Pipeline Milestone 3
 │   │   ├── m3_candidates.py          # Tạo cặp ứng viên BibTeX - Reference
 │   │   ├── m3_pick_papers.py         # Lọc bài đủ điều kiện gán nhãn M3
+│   │   ├── m3_data_inspector.py      # Kiểm tra thống kê dữ liệu M1/M2 phục vụ M3
 │   │   ├── m3_string_features.py     # Đặc trưng so khớp chuỗi
 │   │   ├── m3_context_features.py    # Đặc trưng ngữ cảnh từ câu trích dẫn
 │   │   ├── m3_auto_labeler.py        # Tự động sinh nhãn
-│   │   ├── m3_model.py               # Huấn luyện mô hình xếp hạng
-│   │   ├── m3_predictions.py         # Xuất bảng predictions
+│   │   ├── m3_model.py               # Huấn luyện mô hình xếp hạng & ghi scores.parquet
+│   │   ├── m3_predictions.py         # Xuất bảng predictions (top-5)
 │   │   ├── m3_evaluate.py            # Đánh giá độ đo MRR@5
-│   │   └── m3_publish_hf.py          # Đóng gói và đẩy dataset lên Hugging Face
+│   │   ├── m3_error_analysis.py      # Phân tích lỗi bộ xếp hạng
+│   │   └── m3_publish_hf.py          # Lọc theo member, shard Parquet & đẩy lên Hugging Face
 │   ├── utils/                        # Tiện ích chung & cấu hình
 │   │   ├── config.py                 # Đường dẫn chuẩn, hằng số, biến môi trường
 │   │   ├── logger.py                 # Chuẩn hóa định dạng log pipeline
 │   │   ├── schemas.py                # Schema PyArrow 6 bảng & export Parquet
 │   │   └── benchmark.py              # PerfRecorder đo RAM, đĩa, thời gian
-│   └── tests/                        # Bộ kiểm thử tự động (165 tests)
+│   └── tests/                        # Bộ kiểm thử tự động (187 tests, 16 file)
 ├── pytest.ini
 └── requirements.txt                  # Danh sách thư viện Python cần thiết
 ```
@@ -181,9 +183,15 @@ data/                                      # Thư mục gốc dữ liệu (DATA_
 │   ├── elements.parquet                   # Bảng các phần tử văn bản đã làm sạch, khử trùng lặp
 │   ├── hierarchy.parquet                  # Bảng quan hệ cây phân cấp nút - cha
 │   └── bibtex.parquet                     # Bảng mục trích dẫn BibTeX đã chuẩn hóa & gộp version
-├── labels/                                # Nhãn phục vụ huấn luyện và đánh giá M3
-│   ├── manual_labels.csv                  # Nhãn gán thủ công (tối thiểu 100 cặp)
-│   └── auto_labels.csv                    # Nhãn sinh tự động (≥ 10% số bài ngoài tập tay)
+├── m3/                                    # Không gian dữ liệu và đầu ra Milestone 3
+│   ├── split.json                         # Phân chia bài gán tay/tự động và train/valid/test theo từng thành viên
+│   ├── labels/<paper_key>.json            # Nhãn gán tay (source="manual") và tự động (source="auto")
+│   ├── features/<paper_key>.parquet       # Đặc trưng ghép str_* (chuỗi) + ctx_* (ngữ cảnh) cho từng cặp ứng viên
+│   ├── scores.parquet                     # Điểm xếp hạng mọi cặp ứng viên (Khai ghi, Quoc đọc)
+│   ├── predictions.parquet                # Bảng dự đoán top-5 (9 cột: arxiv_id, partition, citation_key, groundtruth_arxiv_id, cand_1..cand_5)
+│   ├── model.pkl, model_metrics.json      # Mô hình đã huấn luyện và báo cáo MRR@5 / độ quan trọng đặc trưng
+│   ├── poster_inputs/                     # Hình/bảng số liệu các thành viên gửi cho poster
+│   └── hf_export/<member>/                # Gói 6 bảng Parquet đã lọc theo ID range, chia shard kèm README.md (Dataset Card)
 ├── benchmark/                             # Nhật ký đo lường hiệu năng
 │   ├── session_001.json                   # Số liệu chi tiết từng phiên chạy Colab
 │   ├── session_002.json
@@ -393,23 +401,63 @@ python src/run_m2.py --workers 8 --skip-existing --export
 
 ### 6.3 Milestone 3: Ghép nối trích dẫn (`src/run_m3.py`)
 
-- **Đầu vào:** `data/export/bibtex.parquet`, `data/references.parquet`, `data/export/elements.parquet`, và file nhãn trong `data/labels/`.
-- **Dữ liệu nhãn:**
-  - `data/labels/manual_labels.csv` và `data/labels/auto_labels.csv`.
-  - Cột: `arxiv_id, citation_key, groundtruth_arxiv_id` (để trống nếu không tìm thấy arXiv ID tương ứng).
-  - Tối thiểu 100 cặp nhãn gán tay từ ít nhất 5 bài báo (mỗi bài ≥ 20 mục BibTeX).
-  - Nhãn tự động được sinh cho ≥ 10% số bài báo còn lại dựa trên đối sánh chính xác tiêu đề và tác giả.
-- **Quy trình M3:**
-  1. Sinh danh sách ứng viên (candidate pairs) giữa BibTeX entries và Semantic Scholar references (`src/matching/m3_candidates.py`).
-  2. Tính toán đặc trưng chuỗi (`src/matching/m3_string_features.py`) và đặc trưng ngữ cảnh từ các câu chứa `\cite` trong `elements` (`src/matching/m3_context_features.py`).
-  3. Huấn luyện bộ phân lớp xếp hạng (`src/matching/m3_model.py`) và đánh giá chất lượng bằng chỉ số **MRR@5** (`src/matching/m3_evaluate.py`).
-  4. Đóng gói và upload toàn bộ 6 bảng Parquet cùng predictions lên Hugging Face Hub (`src/matching/m3_publish_hf.py`).
+M3 thực hiện ghép mỗi mục BibTeX (`bibtex`) với tài liệu tham khảo arXiv đúng (`references`) trong cùng bài báo, xếp hạng top-5 (`cand_1..cand_5`) và đánh giá bằng **MRR@5** (tập truy vấn $Q$ chỉ gồm các mục có reference arXiv đúng). Mỗi thành viên trích xuất và xuất bản 6 bảng Parquet đã shard thuộc ID range của mình lên Hugging Face cá nhân.
+
+#### Chạy pipeline M3 qua `src/run_m3.py`
+
+```bash
+# Chạy toàn bộ pipeline M3 và đóng gói HF cho thành viên 3 (Khai: 2603.00580 - 2603.05579):
+python src/run_m3.py --data-dir ./data --stage all --member 3 --verify-streaming
+
+# Chạy chuỗi bước huấn luyện -> dự đoán top-5 -> đánh giá MRR@5 -> đóng gói HF:
+python src/run_m3.py --data-dir ./data --stage train,predict,evaluate,publish --member 3
+
+# Chạy từng bước độc lập:
+python src/matching/m3_model.py --data-dir ./data --model-type auto
+python src/matching/m3_predictions.py --data-dir ./data
+python src/matching/m3_evaluate.py --data-dir ./data
+python src/matching/m3_publish_hf.py --data-dir ./data --member 3 --verify-streaming --hf-repo <user>/<dataset>
+```
+
+#### Định dạng nhãn (`m3/labels/<paper_key>.json`) và Split (`m3/split.json`)
+
+- **`m3/labels/<paper_key>.json`:** dùng chung một định dạng cho cả nhãn tay (`"source": "manual"`) và nhãn tự động (`"source": "auto"`):
+  ```json
+  {
+    "arxiv_id": "2602.04912",
+    "source": "manual",
+    "labeler": "Khai",
+    "labels": {
+      "wu2025gapgraphbasedagentplanning": "2510.25320",
+      "Guo_2025": null
+    },
+    "evidence": {
+      "wu2025gapgraphbasedagentplanning": "eprint"
+    }
+  }
+  ```
+  - `labels[citation_key] = "<ref_arxiv_id>"`: entry có tài liệu tham khảo arXiv đúng (nằm trong tập truy vấn $Q$ và có dòng trong `predictions.parquet`).
+  - `labels[citation_key] = null`: đã kiểm tra và xác nhận không có reference arXiv đúng (không tính vào $Q$, không sinh dòng trong `predictions.parquet`).
+- **`m3/split.json`:** chia theo từng ID range của 4 thành viên (`Quoc`, `Nguyen`, `Khai`, `Tri`): mỗi người gồm 5 bài gán tay (≥ 20 entry có reference đúng/bài, tổng ≥ 100 entry) và ≥ 10% số bài còn lại gán tự động (~500 bài/range); `test` gồm 1 tay + 1 tự động, `valid` gồm 1 tay + 1 tự động, `train` gồm phần còn lại.
+
+#### Mô tả các nhóm đặc trưng (`m3/features/<paper_key>.parquet`)
+
+Mỗi dòng ứng với đúng một cặp ứng viên `candidate_id` trong `candidates.json` (giá trị thiếu để `null`/`NaN`, được bộ phân lớp xử lý trực tiếp):
+
+- **Nhóm đặc trưng cơ bản & chuỗi (`str_*` / `candidates.json`):**
+  - `title_similarity`, `title_exact`, `str_*` (Jaccard, Levenshtein/RapidFuzz, TF-IDF cosine trên tiêu đề đã chuẩn hóa).
+  - `author_similarity`, tỉ lệ trùng họ tác giả, khớp tác giả đầu/cuối.
+  - Khớp định danh chính xác (`eprint`/arXiv ID, DOI) và độ lệch năm xuất bản.
+- **Nhóm đặc trưng ngữ cảnh & tương đối trong nhóm (`ctx_*`):**
+  - Chênh lệch năm giữa BibTeX entry và `ref_submission_date`; độ tương đồng giữa `journal`/`booktitle` và `ref_venue`.
+  - Thứ hạng tương đối của ứng viên trong cùng `citation_key` và thứ hạng của `citation_key` trong nhóm cùng `ref_arxiv_id` (*mutual best match*), khoảng cách điểm so với ứng viên đứng thứ hai, tổng số ứng viên của entry.
+  - Độ trùng từ vựng giữa các câu trích dẫn chứa `\cite{citation_key}` trong `elements.json` và tiêu đề reference.
 
 ---
 
 ## 7. Kiểm thử & Đảm bảo chất lượng (QA)
 
-Dự án sở hữu bộ kiểm thử tự động toàn diện với **164 tests** (10 file) được tổ chức khoa học trong `src/tests/`.
+Dự án sở hữu bộ kiểm thử tự động toàn diện với **187 tests** (16 file) được tổ chức khoa học trong `src/tests/`.
 
 ```bash
 # Chạy toàn bộ test suite từ thư mục gốc:
@@ -420,6 +468,9 @@ pytest src/tests/test_run_m1_downloader.py src/tests/test_m1_references.py src/t
 
 # Chạy kiểm thử riêng cho M2:
 pytest src/tests/test_m2_pipeline.py src/tests/test_m2_hierarchy.py src/tests/test_m2_text.py src/tests/test_m2_bibliography.py src/tests/test_m2_export_parquet.py -v
+
+# Chạy kiểm thử riêng cho M3:
+pytest src/tests/test_m3_model.py src/tests/test_m3_publish_hf.py src/tests/test_run_m3.py src/tests/test_m3_predictions.py src/tests/test_m3_evaluate.py src/tests/test_m3_error_analysis.py -v
 ```
 
 Mọi bài test đều tự động cô lập thư mục dữ liệu qua `tmp_path`, đảm bảo không làm bẩn hoặc thay đổi dữ liệu thật trong `data/`.

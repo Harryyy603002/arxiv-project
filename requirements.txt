@@ -6,6 +6,8 @@ pyarrow
 psutil
 rapidfuzz
 scikit-learn
+lightgbm
 huggingface_hub
+datasets
 pytest
 python-dotenv
