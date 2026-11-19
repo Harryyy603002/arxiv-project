@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pickle
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
 
 import numpy as np
 import pandas as pd
@@ -34,6 +37,7 @@ from sklearn.preprocessing import StandardScaler
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from matching.m3_evaluate import K, mrr_at_k, reciprocal_rank  # noqa: E402
 from utils import config as C  # noqa: E402
+from utils.schemas import SCORES_SCHEMA  # noqa: E402
 
 try:
     import lightgbm as lgb  # type: ignore
@@ -43,15 +47,6 @@ except ImportError:
     lgb = None
     HAS_LIGHTGBM = False
 
-
-SCORES_SCHEMA = pa.schema([
-    pa.field("candidate_id", pa.string(), nullable=False),
-    pa.field("arxiv_id", pa.string(), nullable=False),
-    pa.field("citation_key", pa.string(), nullable=False),
-    pa.field("ref_arxiv_id", pa.string(), nullable=False),
-    pa.field("score", pa.float64(), nullable=False),
-    pa.field("model_version", pa.string(), nullable=False),
-])
 
 NON_FEATURE_COLS = {
     "candidate_id",

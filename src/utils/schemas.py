@@ -79,6 +79,15 @@ BIBTEX_SCHEMA = pa.schema([
 ])
 
 # Milestone 3
+SCORES_SCHEMA = pa.schema([
+    pa.field("candidate_id", pa.string(), nullable=False),
+    pa.field("arxiv_id", pa.string(), nullable=False),
+    pa.field("citation_key", pa.string(), nullable=False),
+    pa.field("ref_arxiv_id", pa.string(), nullable=False),
+    pa.field("score", pa.float64(), nullable=False),
+    pa.field("model_version", pa.string(), nullable=False),
+])
+
 PREDICTIONS_SCHEMA = pa.schema([
     pa.field("arxiv_id", pa.string(), nullable=False),
     pa.field("partition", DICT_STRING, nullable=False),
