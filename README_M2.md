@@ -11,7 +11,7 @@
 
 Đầu ra cuối là ba bảng Parquet `elements`, `hierarchy`, `bibtex` đúng schema của đề. M2 không gọi mạng; toàn bộ chạy trên CPU.
 
-## 🆕 Kiến trúc Hai Tầng Xử Lý LaTeX
+## Kiến trúc Hai Tầng Xử Lý LaTeX
 
 M2 đã được nâng cấp với kiến trúc hai tầng để xử lý tốt hơn các lệnh LaTeX lạ:
 
@@ -38,12 +38,12 @@ Chạy trong `clean_text()` (bước content).
 4. **Ghi lại:** bộ đếm `unknown_commands` → file `benchmark/unknown_commands.json`
 
 **Lợi ích:**
-- ✅ Giảm lệnh LaTeX sót
-- ✅ Dễ mở rộng (thêm vào bảng trong `m2_cleanup.py`)
-- ✅ Bảo vệ `\cite`, `\ref`, toán
-- ✅ Thống kê lệnh lạ cho vòng lặp cải tiến
+- Giảm lệnh LaTeX sót
+- Dễ mở rộng (thêm vào bảng trong `m2_cleanup.py`)
+- Bảo vệ `\cite`, `\ref`, toán
+- Thống kê lệnh lạ cho vòng lặp cải tiến
 
-📖 **Chi tiết:** Xem [docs/CHANGELOG_M1_M2.md](docs/CHANGELOG_M1_M2.md)
+**Chi tiết:** Xem [docs/CHANGELOG_M1_M2.md](docs/CHANGELOG_M1_M2.md)
 
 ---
 

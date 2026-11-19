@@ -229,6 +229,78 @@ def parse_status_path(arxiv_id: str) -> Path:
     return paper_dir(arxiv_id) / "parse_status.json"
 
 
+# ---------------------------------------------------------------- M3: ID ranges & đường dẫn
+MEMBERS: Tuple[str, ...] = ("Quoc", "Nguyen", "Khai", "Tri")
+MEMBER_RANGES: Dict[str, Tuple[str, str]] = {
+    "Quoc": ("2512.23231", "2601.03155"),
+    "Nguyen": ("2602.04870", "2602.09869"),
+    "Khai": ("2603.00580", "2603.05579"),
+    "Tri": ("2606.20734", "2606.25733"),
+}
+
+
+def id_key(arxiv_id: str) -> Tuple[int, int]:
+    """Chuyển arXiv ID mới ('2602.04870v2') thành khóa so sánh (2602, 4870)."""
+    base = normalize_arxiv_id(arxiv_id) or split_version(arxiv_id)[0]
+    m = _NEW_ID_RE.match(base)
+    if not m:
+        raise ValueError(f"ID không phải dạng YYMM.NNNNN: {arxiv_id!r}")
+    return int(m["yymm"]), int(m["num"])
+
+
+def in_range(arxiv_id: str, member: str) -> bool:
+    """Kiểm tra arxiv_id có nằm trong khoảng ID của thành viên `member` không."""
+    if member not in MEMBER_RANGES:
+        raise KeyError(f"Thành viên không hợp lệ: {member!r}. Chọn trong {MEMBERS}")
+    lo, hi = MEMBER_RANGES[member]
+    try:
+        key = id_key(arxiv_id)
+    except ValueError:
+        return False
+    return id_key(lo) <= key <= id_key(hi)
+
+
+def member_of(arxiv_id: str) -> Optional[str]:
+    """Trả về tên thành viên phụ trách arxiv_id, hoặc None nếu ngoài 4 range."""
+    for member in MEMBERS:
+        if in_range(arxiv_id, member):
+            return member
+    return None
+
+
+def m3_dir(data_dir: Optional[Path] = None) -> Path:
+    return (Path(data_dir) if data_dir is not None else DATA_DIR) / "m3"
+
+
+def labels_path(arxiv_id: str, data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "labels" / f"{paper_key(arxiv_id)}.json"
+
+
+def str_features_path(arxiv_id: str, data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "features" / f"{paper_key(arxiv_id)}.str.parquet"
+
+
+def features_path(arxiv_id: str, data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "features" / f"{paper_key(arxiv_id)}.parquet"
+
+
+def split_path(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "split.json"
+
+
+def scores_path(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "scores.parquet"
+
+
+def predictions_path(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "predictions.parquet"
+
+
+def poster_inputs_dir(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "poster_inputs"
+
+
+
 if __name__ == "__main__":
     ids = list(iter_id_range(*parse_id_range("2602.04870-2602.09869")))
     print(len(ids), ids[0], ids[-1], paper_key("hep-th/9901001"), version_dir("2310.12345", 2))

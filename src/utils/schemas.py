@@ -19,7 +19,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 import pyarrow as pa
@@ -79,6 +79,15 @@ BIBTEX_SCHEMA = pa.schema([
 ])
 
 # Milestone 3
+SCORES_SCHEMA = pa.schema([
+    pa.field("candidate_id", pa.string(), nullable=False),
+    pa.field("arxiv_id", pa.string(), nullable=False),
+    pa.field("citation_key", pa.string(), nullable=False),
+    pa.field("ref_arxiv_id", pa.string(), nullable=False),
+    pa.field("score", pa.float64(), nullable=False),
+    pa.field("model_version", pa.string(), nullable=False),
+])
+
 PREDICTIONS_SCHEMA = pa.schema([
     pa.field("arxiv_id", pa.string(), nullable=False),
     pa.field("partition", DICT_STRING, nullable=False),
@@ -283,6 +292,66 @@ def validate_candidate_rows(rows: list[dict]) -> None:
         for field in ("title_similarity", "author_similarity"):
             if not 0 <= float(row[field]) <= 1:
                 raise ValueError(f"candidate row {index} has invalid {field}")
+
+
+VALID_PARTITIONS = {"train", "valid", "test"}
+CAND_COLS = ("cand_1", "cand_2", "cand_3", "cand_4", "cand_5")
+
+
+def validate_predictions(
+    predictions_df: pd.DataFrame,
+    split_ids: Optional[Iterable[str]] = None,
+) -> List[str]:
+    """Kiểm tra tính toàn vẹn bảng predictions (§4.7 M3_PLAN.md).
+
+    Trả về danh sách lỗi (rỗng = hợp lệ):
+      1. Đủ 9 cột của PREDICTIONS_SCHEMA.
+      2. arxiv_id, partition, citation_key, groundtruth_arxiv_id không được NULL/rỗng
+         (mỗi dòng trong predictions chỉ gồm entry có reference đúng).
+      3. partition thuộc {'train', 'valid', 'test'}.
+      4. cand_1..cand_5 không trùng nhau trên cùng một dòng (bỏ qua giá trị null).
+      5. Không trùng khóa (arxiv_id, citation_key).
+      6. Nếu truyền split_ids: mọi arxiv_id phải thuộc tập bài trong split.json.
+    """
+    errors: List[str] = []
+    missing_cols = [c for c in PREDICTIONS_SCHEMA.names if c not in predictions_df.columns]
+    if missing_cols:
+        errors.append(f"Bảng predictions thiếu cột: {missing_cols}")
+        return errors
+
+    if predictions_df.empty:
+        return errors
+
+    for col in ("arxiv_id", "partition", "citation_key", "groundtruth_arxiv_id"):
+        null_mask = predictions_df[col].isna() | (predictions_df[col].astype(str).str.strip() == "")
+        n_null = int(null_mask.sum())
+        if n_null > 0:
+            errors.append(f"Bảng predictions có {n_null} dòng bị NULL/rỗng ở cột '{col}'.")
+
+    parts = set(predictions_df["partition"].dropna().astype(str).unique())
+    bad_parts = parts - VALID_PARTITIONS
+    if bad_parts:
+        errors.append(f"Bảng predictions có partition không hợp lệ: {sorted(bad_parts)}")
+
+    dup_keys = int(predictions_df.duplicated(subset=["arxiv_id", "citation_key"]).sum())
+    if dup_keys > 0:
+        errors.append(f"Bảng predictions có {dup_keys} dòng bị trùng khóa (arxiv_id, citation_key).")
+
+    dup_cand_rows = 0
+    for row in predictions_df[list(CAND_COLS)].itertuples(index=False):
+        vals = [str(v).strip() for v in row if v is not None and pd.notna(v) and str(v).strip() != ""]
+        if len(vals) != len(set(vals)):
+            dup_cand_rows += 1
+    if dup_cand_rows > 0:
+        errors.append(f"Bảng predictions có {dup_cand_rows} dòng bị trùng ứng viên giữa cand_1..cand_5.")
+
+    if split_ids is not None:
+        allowed = {str(x).strip() for x in split_ids}
+        unknown_ids = set(predictions_df["arxiv_id"].dropna().astype(str)) - allowed
+        if unknown_ids:
+            errors.append(f"Bảng predictions có {len(unknown_ids)} arxiv_id không nằm trong split.json.")
+
+    return errors
 
 
 def main() -> None:
