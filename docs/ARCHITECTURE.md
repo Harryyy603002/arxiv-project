@@ -21,8 +21,8 @@ flowchart LR
     
     %% Milestone 3
     M3["<b>MILESTONE 3</b><br/>Reference Matching<br/>(ML Model)"]
-    M3_Training["<b>TRAINING DATA</b><br/>• Manual labels (≥5k papers)<br/>• Auto labels (≥10%)"]
-    M3_Output["<b>OUTPUT</b><br/>• predictions.parquet<br/>• MRR@5 metrics<br/>• Poster (A2)"]
+    M3_Training["<b>TRAINING DATA</b><br/>• Manual labels (5 papers/member = 20)<br/>• Auto labels (≥10% ≈ 500/member)"]
+    M3_Output["<b>OUTPUT</b><br/>• scores.parquet & predictions.parquet<br/>• MRR@5 metrics<br/>• Poster (A2)"]
     
     %% Final Output
     HF["Hugging Face<br/>Dataset<br/>(6 Parquet tables)"]
@@ -197,9 +197,9 @@ flowchart TB
         
         Inspect["🔍 DATA INSPECTION<br/>• Check quality<br/>• Count entries<br/>• Identify best papers"]
         
-        Manual["✍️ MANUAL LABELING<br/>• ≥5k papers<br/>• ≥20 entries/paper<br/>• ≥100k total labels<br/>→ manual_labels.csv"]
+        Manual["✍️ MANUAL LABELING<br/>• 5 papers/member (20 total)<br/>• ≥20 matched entries/paper<br/>• ≥100 matched entries/member<br/>→ m3/labels/&lt;paper_key&gt;.json"]
         
-        Auto["🤖 AUTO LABELING<br/>• String similarity<br/>• ≥10% remaining papers<br/>• ≥2k papers<br/>→ auto_labels.csv"]
+        Auto["🤖 AUTO LABELING<br/>• eprint / DOI / title+author rules<br/>• ≥10% remaining papers (~500/member)<br/>• ~2,000 papers total<br/>→ m3/labels/&lt;paper_key&gt;.json"]
         
         Features["⚙️ FEATURE ENGINEERING<br/><b>String Features:</b><br/>• Title similarity<br/>• Author similarity<br/>• Year match<br/><br/><b>Context Features:</b><br/>• Citation context<br/>• Document position<br/>• Section type"]
         
@@ -279,10 +279,10 @@ Trong đó:
 ### M3 Target
 | Metric | Target |
 |--------|--------|
-| MRR@5 | Maximize |
-| Manual labels | ≥100k entries |
-| Auto labels | ≥10% papers |
-| Test fairness | k+k papers |
+| MRR@5 | Maximize (evaluated on $Q$ = entries with valid arXiv match) |
+| Manual labels | 5 papers/member (≥20 matched entries/paper, ≥100/member, ≥400 group) |
+| Auto labels | ≥10% remaining papers (~500 papers/member, ~2,000 group) |
+| Test / Valid split | Per member: 1 manual + 1 auto for test, 1 manual + 1 auto for valid |
 
 ---
 

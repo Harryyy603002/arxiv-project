@@ -29,7 +29,7 @@ Dự án xử lý dữ liệu quy mô lớn từ arXiv và Semantic Scholar, chi
 3. **Milestone 3 — Citation Matching (`src/run_m3.py`):**
    - Ghép nối các mục BibTeX trong bài báo với các tài liệu tham khảo (references) thực tế từ Semantic Scholar / arXiv.
    - Trích xuất đặc trưng chuỗi (Levenshtein, Jaro-Winkler, token overlap, difflib ratio) và đặc trưng ngữ cảnh từ các câu trích dẫn trong `elements`.
-   - Gán nhãn thủ công (`manual_labels.csv`) và tự động (`auto_labels.csv`), huấn luyện mô hình phân loại và đánh giá xếp hạng theo độ đo **MRR@5**.
+   - Gán nhãn thủ công và tự động (`m3/labels/<paper_key>.json`, `m3/split.json`), huấn luyện mô hình xếp hạng (`m3/scores.parquet`), sinh bảng dự đoán top-5 (`m3/predictions.parquet`) và đánh giá theo độ đo **MRR@5**.
    - Xuất bản bộ dữ liệu hoàn chỉnh lên Hugging Face Hub.
 
 ---
@@ -228,7 +228,11 @@ data/                                      # Thư mục gốc dữ liệu (DATA_
 | 6 | P2 → P3, P4 | `<paper_key>/cite_map.json`, `bibtex_merged.json` | Ánh xạ đổi tên khóa trích dẫn và bảng BibTeX đã gộp chéo version |
 | 7 | P3 → P4 | `<paper_key>/elements.json`, `hierarchy.json` | Văn bản đã tách câu, giữ nguyên `\cite{...}`, đổi khóa chuẩn, và bảng cạnh cây phân cấp |
 | 8 | P4 → Báo cáo | `data/export/*.parquet` | 3 bảng Parquet M2: `elements.parquet`, `hierarchy.parquet`, `bibtex.parquet` |
-| 9 | Cả nhóm | `labels/manual_labels.csv`, `auto_labels.csv` | Cột: `arxiv_id, citation_key, groundtruth_arxiv_id` |
+| 9 | P1 → Cả nhóm | `data/m3/split.json` | Phân chia bài gán tay/tự động và `train`/`valid`/`test` theo từng ID range |
+| 10 | Cả nhóm → P3, P4 | `data/m3/labels/<paper_key>.json` | `arxiv_id, source ("manual"\|"auto"), labeler, labels ({citation_key: ref_arxiv_id\|null}), evidence` |
+| 11 | P2, P3 → P4 | `data/m3/features/<paper_key>.parquet` | Khóa `candidate_id` kèm các cột số `str_*` và `ctx_*` (thiếu để `null`) |
+| 12 | P4 → P1 | `data/m3/scores.parquet` | `candidate_id, arxiv_id, citation_key, ref_arxiv_id, score, model_version` |
+| 13 | P1 → P4, HF | `data/m3/predictions.parquet` | 9 cột: `arxiv_id, partition, citation_key, groundtruth_arxiv_id, cand_1..cand_5` |
 
 ---
 

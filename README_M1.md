@@ -41,7 +41,7 @@ Xem chi tiết: **[Section 3 - Chạy trên Colab](#3-chạy-trên-google-colab)
 ```bash
 # Setup
 git clone <repo> && cd <repo>
-pip install -r src/requirements.txt
+pip install -r requirements.txt
 export CONTACT_EMAIL="your@email.com"
 export S2_API_KEY="your_key"
 
@@ -60,7 +60,7 @@ python src/run_m1.py --ids-file ID.txt --month-last 2512=25075 \
 
 ### Yêu cầu
 - Python 3.10+
-- Dependencies: xem `src/requirements.txt`
+- Dependencies: xem `requirements.txt` (ở thư mục gốc)
 
 ### Biến môi trường
 
@@ -365,10 +365,11 @@ if bench_dir.exists():
         print(f"   Peak Disk: {data.get('peak_disk_mb', 0):.0f} MB")
 ```
 
-### ✅ Verify trước khi nộp
+### ✅ Tổng hợp benchmark & dựng bảng Parquet trước khi nộp
 
 ```bash
-python scripts/verify_m1_completion.py --ids-file ID.txt --corpus-dir /content/corpus
+python src/crawler/m1_aggregate.py --data-dir /content/corpus
+python src/crawler/m1_tables.py --data-dir /content/corpus
 ```
 
 **Output:**
