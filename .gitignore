@@ -50,3 +50,7 @@ api.env
 Thumbs.db
 .vscode/
 .idea/
+
+# Danh sách ID crawl riêng
+ID.txt
+ID.TXT
