@@ -21,7 +21,7 @@ def _seed_m1_m2_tables_for_m3_corpus(data_dir: Path) -> None:
         {
             "arxiv_id": aid,
             "title": f"Paper {aid}",
-            "authors": ["Khai"],
+            "authors": ["Author A."],
             "submission_date": "2026-03-01",
             "revised_dates": ["2026-03-01"],
             "venue": "ICML",

@@ -13,39 +13,38 @@ from utils import schemas as S
 
 @pytest.fixture
 def publish_corpus(tmp_path: Path) -> Path:
-    """Tạo corpus gồm 6 bảng Parquet chứa bài của cả Khai (range 3) và Nguyen (range 2)."""
+    """Tạo corpus gồm 6 bảng Parquet chứa bài thuộc range 3 và range 2."""
     data_dir = tmp_path / "data"
 
-    # 3 bài của Khai (train, valid, test) + 1 bài của Nguyen (2602.04912)
     papers_df = pd.DataFrame([
         {
             "arxiv_id": "2603.00580",
-            "title": "Khai Train Paper",
-            "authors": ["Khai A."],
+            "title": "Sample Train Paper",
+            "authors": ["Author A."],
             "submission_date": "2026-03-01",
             "revised_dates": ["2026-03-01"],
             "venue": "ICML",
         },
         {
             "arxiv_id": "2603.00581",
-            "title": "Khai Valid Paper",
-            "authors": ["Khai B."],
+            "title": "Sample Valid Paper",
+            "authors": ["Author B."],
             "submission_date": "2026-03-02",
             "revised_dates": ["2026-03-02"],
             "venue": "NeurIPS",
         },
         {
             "arxiv_id": "2603.00582",
-            "title": "Khai Test Paper",
-            "authors": ["Khai C."],
+            "title": "Sample Test Paper",
+            "authors": ["Author C."],
             "submission_date": "2026-03-03",
             "revised_dates": ["2026-03-03"],
             "venue": "ICLR",
         },
         {
             "arxiv_id": "2602.04912",
-            "title": "Nguyen Paper",
-            "authors": ["Nguyen D."],
+            "title": "External Range Paper",
+            "authors": ["Author D."],
             "submission_date": "2026-02-10",
             "revised_dates": ["2026-02-10"],
             "venue": "ACL",
