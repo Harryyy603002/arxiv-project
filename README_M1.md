@@ -2,7 +2,7 @@
 
 Pipeline thu thập và xử lý bài báo arXiv (LaTeX source + references) cho đồ án Nhập môn Khoa học Dữ liệu.
 
-## 📋 Tổng quan
+## Tổng quan
 
 **Milestone 1 (M1)**: Crawl arXiv (mọi version) + references (Semantic Scholar) + benchmark
 
@@ -14,15 +14,15 @@ Với mỗi bài báo, chương trình:
 5. Đo hiệu năng (thời gian, RAM, đĩa) theo từng phiên và tổng hợp
 
 **Đặc điểm:**
-- ✅ Một cây thư mục duy nhất (corpus)
-- ✅ Resume an toàn: checkpoint theo version/bài/ID
-- ✅ Nhiều phiên Colab: log riêng mỗi phiên + tổng hợp tự động
-- ✅ Backup thông minh: tarball (nhanh 10-20x so với rsync)
-- ✅ Cache discovery để không crawl lại từ đầu
+- Một cây thư mục duy nhất (corpus)
+- Resume an toàn: checkpoint theo version/bài/ID
+- Nhiều phiên Colab: log riêng mỗi phiên + tổng hợp tự động
+- Backup thông minh: tarball (nhanh 10-20x so với rsync)
+- Cache discovery để không crawl lại từ đầu
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Google Colab (Khuyến nghị)
 
@@ -41,7 +41,7 @@ Xem chi tiết: **[Section 3 - Chạy trên Colab](#3-chạy-trên-google-colab)
 ```bash
 # Setup
 git clone <repo> && cd <repo>
-pip install -r src/requirements.txt
+pip install -r requirements.txt
 export CONTACT_EMAIL="your@email.com"
 export S2_API_KEY="your_key"
 
@@ -60,15 +60,15 @@ python src/run_m1.py --ids-file ID.txt --month-last 2512=25075 \
 
 ### Yêu cầu
 - Python 3.10+
-- Dependencies: xem `src/requirements.txt`
+- Dependencies: xem `requirements.txt` (ở thư mục gốc)
 
 ### Biến môi trường
 
 | Biến | Bắt buộc | Mô tả |
 |------|----------|-------|
-| `CONTACT_EMAIL` | ✅ Có | Email thật cho User-Agent (arXiv yêu cầu) |
-| `S2_API_KEY` | ⚠️ Nên có | API key Semantic Scholar (miễn phí, tránh 429) |
-| `ARXIV_DATA_DIR` | ❌ Không | Thư mục dữ liệu mặc định (có thể dùng `--corpus-dir`) |
+| `CONTACT_EMAIL` | Có | Email thật cho User-Agent (arXiv yêu cầu) |
+| `S2_API_KEY` | Nên có | API key Semantic Scholar (miễn phí, tránh 429) |
+| `ARXIV_DATA_DIR` | Không | Thư mục dữ liệu mặc định (có thể dùng `--corpus-dir`) |
 
 **Cách đặt:**
 
@@ -151,7 +151,7 @@ python src/run_m1.py --ids-file ID.txt --sample 50
 
 ## 3. Chạy trên Google Colab
 
-### 🎯 Lý do nên dùng Colab
+### Lý do nên dùng Colab
 
 | Ưu điểm | Chi tiết |
 |---------|----------|
@@ -160,7 +160,7 @@ python src/run_m1.py --ids-file ID.txt --sample 50
 | **Resume dễ dàng** | Checkpoint mỗi batch, tiếp tục sau 12h ngắt |
 | **Restore nhanh** | Tarball: 2-5 phút thay vì 30-60 phút (rsync) |
 
-### 📋 Workflow 3 ô
+### Workflow 3 ô
 
 Copy code dưới đây vào 3 ô Colab riêng biệt:
 
@@ -188,7 +188,7 @@ LOGS = "/content/drive/MyDrive/arxiv_project/logs"
 
 !mkdir -p {CORPUS} {LOGS} {BACKUP}
 
-print("✓ Setup hoàn tất")
+print("Setup hoàn tất")
 ```
 
 #### **Ô 2: Restore từ backup**
@@ -199,34 +199,34 @@ from pathlib import Path
 import time
 import json
 
-print("🔍 Checking for backups...\n")
+print("Checking for backups...\n")
 
 # 1. Restore critical cache (discovery + benchmark logs) - Ưu tiên cao
 critical_tar = Path(f"{BACKUP}/critical_cache.tar.gz")
 if critical_tar.exists():
-    print("📦 Restoring critical cache...")
+    print("Restoring critical cache...")
     start = time.time()
     !tar -xzf {critical_tar} -C {CORPUS}/ 2>/dev/null
-    print(f"✓ Done in {time.time()-start:.1f}s\n")
+    print(f"Done in {time.time()-start:.1f}s\n")
 else:
-    print("ℹ️  No critical cache (first run)\n")
+    print("No critical cache (first run)\n")
 
 # 2. Restore papers từ các batch
 paper_tars = sorted(Path(BACKUP).glob("papers_batch_*.tar.gz"))
 if paper_tars:
-    print(f"📦 Restoring {len(paper_tars)} paper batches...")
+    print(f"Restoring {len(paper_tars)} paper batches...")
     start = time.time()
     for tar_file in paper_tars:
         !tar -xzf {tar_file} -C {CORPUS}/ 2>/dev/null
-    print(f"✓ Done in {time.time()-start:.1f}s\n")
+    print(f"Done in {time.time()-start:.1f}s\n")
 else:
-    print("ℹ️  No paper backups (first run)\n")
+    print("No paper backups (first run)\n")
 
 # 3. Restore benchmark logs
 bench_tar = Path(f"{BACKUP}/benchmark_logs.tar.gz")
 if bench_tar.exists():
     !tar -xzf {bench_tar} -C {CORPUS}/ 2>/dev/null
-    print("✓ Benchmark logs restored\n")
+    print("Benchmark logs restored\n")
 
 # 4. Status check
 print("="*50)
@@ -237,18 +237,18 @@ cache_file = Path(f"{CORPUS}/discovery_cache.json")
 if cache_file.exists():
     cache = json.loads(cache_file.read_text())
     n_cached = len(cache.get("info", {}))
-    print(f"✅ Discovery cache: {n_cached} IDs")
+    print(f"Discovery cache: {n_cached} IDs")
 else:
-    print("⚠️  No discovery cache")
+    print("No discovery cache")
 
 paper_dirs = [d for d in Path(CORPUS).iterdir() 
               if d.is_dir() and not d.name.startswith(".") and d.name != "benchmark"]
-print(f"✅ Papers crawled: {len(paper_dirs)}")
+print(f"Papers crawled: {len(paper_dirs)}")
 
 bench_dir = Path(f"{CORPUS}/benchmark")
 if bench_dir.exists():
     sessions = list(bench_dir.glob("session_*.json"))
-    print(f"✅ Previous sessions: {len(sessions)}")
+    print(f"Previous sessions: {len(sessions)}")
     if sessions:
         latest = max(sessions, key=lambda p: p.stat().st_mtime)
         data = json.loads(latest.read_text())
@@ -260,7 +260,7 @@ if bench_dir.exists():
             print(f"   Progress: {crawled}/{expected} ({pct:.1f}%)")
 
 print(f"\n{'='*50}")
-print("🚀 Ready to run M1!")
+print("Ready to run M1!")
 ```
 
 **So sánh tốc độ restore:**
@@ -280,9 +280,9 @@ import subprocess
 timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 log_file = f"{LOGS}/run_m1_{timestamp}.log"
 
-print(f"🚀 Starting M1 at {timestamp}")
-print(f"📝 Log: {log_file}")
-print(f"💾 Backup: {BACKUP}\n")
+print(f"Starting M1 at {timestamp}")
+print(f"Log: {log_file}")
+print(f"Backup: {BACKUP}\n")
 
 # Command
 cmd = [
@@ -312,7 +312,7 @@ with open(log_file, 'w', encoding='utf-8') as f:
     process.wait()
 
 print(f"\n{'='*60}")
-print(f"✓ Completed with exit code: {process.returncode}")
+print(f"Completed with exit code: {process.returncode}")
 ```
 
 **Backup tự động:**
@@ -320,7 +320,7 @@ print(f"✓ Completed with exit code: {process.returncode}")
 - **Papers**: Backup sau mỗi batch 20 papers (~30-60 giây/batch)
 - **Benchmark logs**: Checkpoint mỗi phút
 
-### 📊 Workflow nhiều phiên
+### Workflow nhiều phiên
 
 ```
 Phiên 1: Discovery (500 IDs) → Backup cache → Crawl 100 papers → Ngắt (8h)
@@ -332,7 +332,7 @@ Phiên 3: Restore (5s) → Skip 200 done → Crawl final 50 → Complete (5h)
 Kết quả: benchmark_m1_total.json (tổng hợp 3 phiên, 22h)
 ```
 
-### 🔍 Ô phụ: Kiểm tra tiến độ
+### Ô phụ: Kiểm tra tiến độ
 
 ```python
 # Chạy ô này ở tab khác để xem progress realtime (không làm gián đoạn crawl)
@@ -346,39 +346,40 @@ if bench_dir.exists():
         latest = sessions[-1]
         data = json.loads(latest.read_text())
         
-        print(f"📊 Session {data['session_index']}: {data['status']}")
+        print(f"Session {data['session_index']}: {data['status']}")
         
         cov = data.get('coverage', {})
         crawled = cov.get('crawled_versions', 0)
         expected = cov.get('expected_versions', 0)
         if expected:
-            print(f"📈 Progress: {crawled}/{expected} ({crawled/expected*100:.1f}%)")
+            print(f"Progress: {crawled}/{expected} ({crawled/expected*100:.1f}%)")
         
         stages = data.get('stages_s', {})
         if stages:
-            print(f"\n⏱️  Time spent:")
+            print(f"\nTime spent:")
             for stage, sec in stages.items():
                 print(f"   {stage}: {sec/60:.1f} min")
         
-        print(f"\n💾 Resources:")
+        print(f"\nResources:")
         print(f"   Peak RAM: {data.get('peak_ram_mb', 0):.0f} MB")
         print(f"   Peak Disk: {data.get('peak_disk_mb', 0):.0f} MB")
 ```
 
-### ✅ Verify trước khi nộp
+### Tổng hợp benchmark & dựng bảng Parquet trước khi nộp
 
 ```bash
-python scripts/verify_m1_completion.py --ids-file ID.txt --corpus-dir /content/corpus
+python src/crawler/m1_aggregate.py --data-dir /content/corpus
+python src/crawler/m1_tables.py --data-dir /content/corpus
 ```
 
 **Output:**
 ```
-✅ Discovery: OK
-✅ Papers: 19998/20000 (99.99% coverage)
-✅ Benchmark: 3 sessions, completed
-✅ Tables: papers.parquet (245 MB), references.parquet (129 MB)
+Discovery: OK
+Papers: 19998/20000 (99.99% coverage)
+Benchmark: 3 sessions, completed
+Tables: papers.parquet (245 MB), references.parquet (129 MB)
 
-🎉 SẴN SÀNG NỘP BÀI!
+SẴN SÀNG NỘP BÀI!
 ```
 
 ---
@@ -501,7 +502,7 @@ Tổng ≈ (số version) × max(3s, thời gian tải) + discovery
 
 ## 7. Tối ưu hóa
 
-### ✅ Đã làm
+### Đã làm
 
 | Kỹ thuật | Lợi ích |
 |----------|---------|
@@ -512,12 +513,12 @@ Tổng ≈ (số version) × max(3s, thời gian tải) + discovery
 | **Tarball backup** | Restore nhanh 10-20x (2-5 phút vs 30-60 phút) |
 | **Backup cache ngay sau discovery** | Không mất cache khi ngắt sớm |
 
-### ❌ Không làm (vi phạm arXiv ToS hoặc lợi ích thấp)
+### Không làm (vi phạm arXiv ToS hoặc lợi ích thấp)
 
-- ❌ Giảm khoảng cách < 3 giây
-- ❌ Tải song song nhiều version
-- ❌ Đổi IP / chia ID cho nhiều máy
-- ❌ Bất kỳ kỹ thuật nào bypass rate limit
+- Giảm khoảng cách < 3 giây
+- Tải song song nhiều version
+- Đổi IP / chia ID cho nhiều máy
+- Bất kỳ kỹ thuật nào bypass rate limit
 
 **Kết luận**: Tốc độ đã gần tối ưu với giới hạn của arXiv.
 
@@ -546,12 +547,12 @@ Tổng ≈ (số version) × max(3s, thời gian tải) + discovery
 
 ---
 
-## ⚖️ Quy tắc arXiv
+## Quy tắc arXiv
 
 **Đã tuân thủ trong code:**
-- ✅ Chỉ dùng `export.arxiv.org`
-- ✅ Một kết nối duy nhất
-- ✅ Khoảng cách tối thiểu 3 giây giữa các request
-- ✅ User-Agent có email liên hệ
+- Chỉ dùng `export.arxiv.org`
+- Một kết nối duy nhất
+- Khoảng cách tối thiểu 3 giây giữa các request
+- User-Agent có email liên hệ
 
 **KHÔNG sửa các thông số này** để chạy nhanh hơn → Vi phạm ToS → Bị 403 → Fail project.

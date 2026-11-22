@@ -29,7 +29,7 @@ If you are about to run something, read the "run order" section of [06 Integrati
 | [04 M2 parsing](./04_m2_parsing.md) | Root detection, include expansion, hierarchy tree, text cleaning, sentence splitting, bibtex, dedup, Parquet export |
 | [05 M3 matching](./05_m3_matching.md) | What exists (candidate generation) and what still needs building (labelling, features, model, MRR@5) |
 | [06 Integration](./06_integration.md) | How milestones hand off to each other, end-to-end run order, and the integration defects |
-| [07 Testing and performance](./07_testing_and_performance.md) | The 164-test suite, the benchmark API, and how to produce the M1 report's required numbers |
+| [07 Testing and performance](./07_testing_and_performance.md) | The 187-test suite (16 test files), the benchmark API, and how to produce the M1/M2/M3 report numbers |
 | [08 Development log](./08_development_log.md) | Commit timeline, design rationale, known defects, debugging notes, open decisions |
 
 Planning documents (external PDFs not stored in the repository):
@@ -60,7 +60,7 @@ Used consistently across all nine documents:
 - **Missing** — nothing exists.
 - **Unverified** — the repository cannot prove the claim.
 
-A feature being *implemented* does not mean the full milestone is wired up. `m3_candidates` is implemented, while `run_m3.py` still raises `NotImplementedError`. Read [05 M3 matching](./05_m3_matching.md) and [06 Integration](./06_integration.md) before assuming a module runs.
+A feature being *implemented* does not mean every teammate's sub-module is finished. In M3, `run_m3.py`, `m3_model.py`, `m3_publish_hf.py`, `m3_predictions.py`, `m3_evaluate.py`, `m3_error_analysis.py`, `m3_candidates.py`, `m3_pick_papers.py`, and `m3_data_inspector.py` are implemented, while `m3_auto_labeler.py`, `m3_string_features.py`, and `m3_context_features.py` are still stubs raising `NotImplementedError`. Read [M3_PLAN.md](./M3_PLAN.md) and [05 M3 matching](./05_m3_matching.md) for details.
 
 ---
 
@@ -70,9 +70,9 @@ Full detail in [06 Integration](./06_integration.md) and [08 Development log](./
 
 | # | Defect | Severity | Impact |
 | --- | --- | --- | --- |
-| 1 | Redundant `v{N}/references.json` duplicated per version | 🟡 Medium | Disk space waste across thousands of versions |
-| 2 | `unknown_commands` counter in `m2_cleanup.py` never reset | 🟡 Low | Cumulative counts across multiple runs in same process |
-| 3 | M3 pipeline modules (`run_m3.py`, `m3_model.py`, …) are stubs | 🟡 Medium | M3 raises `NotImplementedError` until implemented |
+| 1 | Redundant `v{N}/references.json` duplicated per version | Medium | Disk space waste across thousands of versions |
+| 2 | `unknown_commands` counter in `m2_cleanup.py` never reset | Low | Cumulative counts across multiple runs in same process |
+| 3 | Remaining M3 stubs (`m3_auto_labeler.py`, `m3_string_features.py`, `m3_context_features.py`) | Medium | Skipped with fallback unless implemented by Tri/Nguyen |
 
 ---
 
@@ -82,7 +82,7 @@ Full detail in [06 Integration](./06_integration.md) and [08 Development log](./
 python -m pytest src/tests -q
 ```
 
-Current empirical baseline: `164 passed` across all 10 test files in `src/tests/`.
+Current empirical baseline: `187 passed` across all 16 test files in `src/tests/`.
 
 Dependencies: `pip install -r requirements.txt` (kept as the single requirements file at repository root).
 
