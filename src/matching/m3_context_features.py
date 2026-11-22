@@ -44,9 +44,22 @@ Vì sao feature là "theo cặp" hoặc "tương đối trong nhóm" (PLAN_M3.md
     ctx_n_source_versions    số version có entry này
     ctx_bib_is_bibitem       entry đến từ \bibitem (1) hay .bib (0)
 
+Kiểm tra đầu vào và chế độ strict:
+  - candidates.json là BẮT BUỘC (thiếu, hỏng JSON hoặc sai kiểu -> InputError, không ghi Parquet).
+    refs.json bắt buộc khi bài có ứng viên. elements/hierarchy/bibtex_merged có thể vắng (bài M2 rỗng):
+    thiếu thì ctx_* tương ứng là null và có cảnh báo; có mặt nhưng hỏng thì vẫn là lỗi.
+  - Chế độ strict (--require-str, dùng khi chạy trong pipeline): bắt buộc có .str.parquet của Tri với
+    ít nhất một cột str_*, đúng cùng tập candidate_id, khóa (arxiv_id, citation_key, ref_arxiv_id) nếu có
+    trong file phải khớp candidates.json; mọi bài phải có cùng tập cột.
+  - Có bài lỗi thì tiến trình thoát với mã 1 (trừ khi có --allow-errors); batch vẫn chạy hết các bài còn lại.
+
 Chạy (từ thư mục gốc repo):
     python src/matching/m3_context_features.py --corpus-dir /content/corpus
-    python src/matching/m3_context_features.py --corpus-dir /content/corpus --ids 2602.04912
+    python src/matching/m3_context_features.py --corpus-dir /content/corpus --ids 2602.04912 --require-str
+
+Gọi từ run_m3.py (stage features):
+    from matching.m3_context_features import run_stage
+    summary = run_stage(ids, workers=4)          # strict; raise FeatureStageError nếu còn bài lỗi
 """
 from __future__ import annotations
 
@@ -109,11 +122,45 @@ def features_path(arxiv_id: str, suffix: str = "") -> Path:
     return features_dir() / f"{C.paper_key(arxiv_id)}{suffix}.parquet"
 
 
+class InputError(Exception):
+    """Dữ liệu đầu vào của một bài thiếu, hỏng hoặc sai kiểu. Không được ghi Parquet cho bài này."""
+
+
+class FeatureStageError(RuntimeError):
+    """Bước features kết thúc nhưng còn bài lỗi hoặc bảng không cùng tập cột."""
+
+    def __init__(self, summary: dict):
+        super().__init__(f"bước features lỗi: {summary.get('errors')} bài lỗi, "
+                         f"cùng tập cột = {summary.get('columns_consistent')}")
+        self.summary = summary
+
+
 def _read_json(path: Path, default=None):
+    """Chỉ dùng cho metadata tùy chọn (paper.json khi dò ID); đầu vào của feature dùng _load_input."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
+
+
+def _load_input(path: Path, arxiv_id: str, expected: type, required: bool, default):
+    """Đọc một file JSON đầu vào của bài.
+
+    Thiếu file: required -> InputError; không required -> cảnh báo và dùng default.
+    File có mặt nhưng không đọc được, JSON sai cú pháp hay sai kiểu gốc: luôn InputError.
+    """
+    if not path.exists():
+        if required:
+            raise InputError(f"{arxiv_id}: thiếu file bắt buộc {path}")
+        log.warning("%s: thiếu %s, các feature phụ thuộc file này sẽ là null", arxiv_id, path.name)
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise InputError(f"{arxiv_id}: không đọc được {path}: {error}") from error
+    if not isinstance(data, expected):
+        raise InputError(f"{arxiv_id}: {path} phải là {expected.__name__}, nhận được {type(data).__name__}")
+    return data
 
 
 # ----------------------------------------------------------------------------- văn bản
@@ -212,18 +259,33 @@ def _margin_to_best_other(frame: pd.DataFrame, group: str, value: str) -> pd.Ser
     return frame[value] - other_best
 
 
+_GROUP_COLUMNS = ("ctx_n_cand_entry", "ctx_rank_in_entry", "ctx_author_rank_in_entry", "ctx_title_margin",
+                  "ctx_n_cand_ref", "ctx_rank_in_ref", "ctx_ref_margin", "ctx_mutual_best")
+_PAIR_KEY = ["citation_key", "ref_arxiv_id"]
+
+
 def _group_features(frame: pd.DataFrame) -> pd.DataFrame:
-    by_entry = frame.groupby("citation_key")
-    by_ref = frame.groupby("ref_arxiv_id")
-    frame["ctx_n_cand_entry"] = by_entry["candidate_id"].transform("size")
-    frame["ctx_rank_in_entry"] = by_entry["title_similarity"].rank(method="min", ascending=False)
-    frame["ctx_author_rank_in_entry"] = by_entry["author_similarity"].rank(method="min", ascending=False)
-    frame["ctx_title_margin"] = _margin_to_best_other(frame, "citation_key", "title_similarity")
-    frame["ctx_n_cand_ref"] = by_ref["candidate_id"].transform("size")
-    frame["ctx_rank_in_ref"] = by_ref["title_similarity"].rank(method="min", ascending=False)
-    frame["ctx_ref_margin"] = _margin_to_best_other(frame, "ref_arxiv_id", "title_similarity")
-    frame["ctx_mutual_best"] = ((frame["ctx_rank_in_entry"] == 1) & (frame["ctx_rank_in_ref"] == 1)).astype(int)
-    return frame
+    """Feature tương đối trong nhóm, tính trên các cặp (entry, ref_arxiv_id) KHÁC NHAU.
+
+    S2 có thể có hai bản ghi (hai ref_s2_id) cho cùng một arXiv ID; nếu đếm riêng thì số ứng viên và hạng
+    bị thổi phồng. Vì vậy gộp theo (citation_key, ref_arxiv_id) lấy điểm cao nhất, tính hạng trên bảng gộp,
+    rồi gán ngược cho mọi dòng của cặp đó. Tie dùng method="min" (cùng điểm thì cùng hạng).
+    """
+    pairs = frame.groupby(_PAIR_KEY, as_index=False, dropna=False).agg(
+        title_similarity=("title_similarity", "max"), author_similarity=("author_similarity", "max"))
+    by_entry = pairs.groupby("citation_key")
+    by_ref = pairs.groupby("ref_arxiv_id", dropna=False)
+    pairs["ctx_n_cand_entry"] = by_entry["ref_arxiv_id"].transform("size")
+    pairs["ctx_rank_in_entry"] = by_entry["title_similarity"].rank(method="min", ascending=False)
+    pairs["ctx_author_rank_in_entry"] = by_entry["author_similarity"].rank(method="min", ascending=False)
+    pairs["ctx_title_margin"] = _margin_to_best_other(pairs, "citation_key", "title_similarity")
+    pairs["ctx_n_cand_ref"] = by_ref["citation_key"].transform("size")
+    pairs["ctx_rank_in_ref"] = by_ref["title_similarity"].rank(method="min", ascending=False)
+    pairs["ctx_ref_margin"] = _margin_to_best_other(pairs, "ref_arxiv_id", "title_similarity")
+    pairs["ctx_mutual_best"] = ((pairs["ctx_rank_in_entry"] == 1) & (pairs["ctx_rank_in_ref"] == 1)).astype(int)
+    merged = frame.merge(pairs[_PAIR_KEY + list(_GROUP_COLUMNS)], on=_PAIR_KEY, how="left", validate="many_to_one")
+    merged.index = frame.index
+    return merged
 
 
 # ----------------------------------------------------------------------------- tính feature một bài
@@ -250,7 +312,13 @@ def compute_features(candidates: List[dict], bib_rows: List[dict], references: L
     })
     frame = _group_features(frame)
 
-    ref_by_id = {C.normalize_arxiv_id(r.get("ref_arxiv_id")): r for r in references if r.get("ref_arxiv_id")}
+    # Ghép reference theo ref_s2_id trước (duy nhất cho từng bản ghi), ref_arxiv_id làm phương án dự phòng.
+    # Nếu nhiều bản ghi cùng arXiv ID thì giữ bản ghi đầu tiên (xác định, không bị ghi đè ngẫu nhiên).
+    ref_by_s2 = {r["ref_s2_id"]: r for r in references if r.get("ref_s2_id")}
+    ref_by_id: Dict[str, dict] = {}
+    for r in references:
+        if r.get("ref_arxiv_id"):
+            ref_by_id.setdefault(C.normalize_arxiv_id(r["ref_arxiv_id"]), r)
     bib_by_key = {row["citation_key"]: row for row in bib_rows}
     contexts = build_cite_contexts(elements, edges)
 
@@ -269,7 +337,7 @@ def compute_features(candidates: List[dict], bib_rows: List[dict], references: L
     author_mentioned = [pd.NA] * n_rows
 
     for i, cand in enumerate(candidates):
-        reference = ref_by_id.get(C.normalize_arxiv_id(cand.get("ref_arxiv_id")))
+        reference = ref_by_s2.get(cand.get("ref_s2_id")) or ref_by_id.get(C.normalize_arxiv_id(cand.get("ref_arxiv_id")))
         bib = bib_by_key.get(cand.get("citation_key"), {})
         if reference is not None:
             ref_year = _year(reference.get("ref_submission_date"))
@@ -315,8 +383,26 @@ def compute_features(candidates: List[dict], bib_rows: List[dict], references: L
 
 
 # ----------------------------------------------------------------------------- kiểm tra hợp đồng
+_DATA_KEYS = ("arxiv_id", "citation_key", "ref_arxiv_id")
+
+
+def _none_if_na(value):
+    return None if pd.isna(value) else value
+
+
+def _check_keys(frame: pd.DataFrame, candidates: List[dict], where: str) -> None:
+    """Giá trị arxiv_id, citation_key, ref_arxiv_id của TỪNG dòng phải bằng candidate gốc cùng thứ tự."""
+    for column in _DATA_KEYS:
+        actual = [_none_if_na(v) for v in frame[column]]
+        expected = [c.get(column) for c in candidates]
+        bad = [frame["candidate_id"].iloc[i] for i, (a, b) in enumerate(zip(actual, expected)) if a != b]
+        if bad:
+            raise ValueError(f"{where}: cột {column} lệch candidates.json ở {len(bad)} dòng, "
+                             f"ví dụ candidate_id {bad[:3]}")
+
+
 def validate_features(frame: pd.DataFrame, candidates: List[dict]) -> None:
-    """Đúng một dòng cho mỗi candidate_id, đúng cột khóa, mọi cột còn lại là số."""
+    """Đúng một dòng cho mỗi candidate (cùng thứ tự), đúng GIÁ TRỊ cột khóa, mọi cột còn lại là số."""
     ids = [c["candidate_id"] for c in candidates]
     if len(frame) != len(ids) or list(frame["candidate_id"]) != ids:
         raise ValueError("features phải có đúng một dòng cho mỗi dòng của candidates.json, cùng thứ tự")
@@ -325,6 +411,7 @@ def validate_features(frame: pd.DataFrame, candidates: List[dict]) -> None:
     missing = [c for c in KEY_COLUMNS if c not in frame.columns]
     if missing:
         raise ValueError(f"thiếu cột khóa: {missing}")
+    _check_keys(frame, candidates, "features")
     for name in frame.columns:
         if name in KEY_COLUMNS:
             continue
@@ -335,39 +422,63 @@ def validate_features(frame: pd.DataFrame, candidates: List[dict]) -> None:
 
 
 def merge_string_features(frame: pd.DataFrame, str_frame: pd.DataFrame) -> pd.DataFrame:
-    """Ghép cột str_* của Tri vào frame theo candidate_id (phải trùng khớp hoàn toàn tập dòng)."""
-    str_cols = [c for c in str_frame.columns if c.startswith("str_")]
+    """Ghép cột str_* của Tri vào frame theo candidate_id.
+
+    Từ chối: thiếu candidate_id, candidate_id trùng, lệch tập candidate_id, không có cột str_* nào,
+    cột str_* không phải số, hoặc cột khóa (nếu file của Tri có) không khớp candidates.json.
+    """
     if "candidate_id" not in str_frame.columns:
         raise ValueError("file .str.parquet thiếu candidate_id")
     if str_frame["candidate_id"].duplicated().any():
         raise ValueError("file .str.parquet có candidate_id trùng")
     if set(str_frame["candidate_id"]) != set(frame["candidate_id"]):
         raise ValueError("file .str.parquet không cùng tập candidate_id với candidates.json")
-    merged = frame[list(KEY_COLUMNS)].merge(
-        str_frame[["candidate_id"] + str_cols], on="candidate_id", how="left", validate="one_to_one")
-    merged = pd.concat([merged, frame[list(CTX_COLUMNS)]], axis=1)
+    str_cols = [c for c in str_frame.columns if c.startswith("str_")]
+    if not str_cols:
+        raise ValueError("file .str.parquet không có cột str_* nào")
+    for name in str_cols:
+        if not pd.api.types.is_numeric_dtype(str_frame[name]) and not pd.api.types.is_bool_dtype(str_frame[name]):
+            raise ValueError(f"cột {name!r} trong .str.parquet không phải kiểu số")
+    aligned = str_frame.set_index("candidate_id").loc[frame["candidate_id"]].reset_index()
+    key_cols = [c for c in _DATA_KEYS if c in aligned.columns]
+    for column in key_cols:  # file của Tri mang khóa thì phải khớp
+        actual = [_none_if_na(v) for v in aligned[column]]
+        expected = [_none_if_na(v) for v in frame[column]]
+        if actual != expected:
+            raise ValueError(f"file .str.parquet: cột {column} không khớp candidates.json")
+    merged = frame[list(KEY_COLUMNS)].reset_index(drop=True)
+    merged = pd.concat([merged, aligned[str_cols].reset_index(drop=True), frame[list(CTX_COLUMNS)].reset_index(drop=True)], axis=1)
     return merged
 
 
 # ----------------------------------------------------------------------------- một bài
-def process_paper(arxiv_id: str) -> dict:
-    """Đọc dữ liệu M2 của một bài, tính ctx_*, ghép str_* nếu có, ghi <paper_key>.parquet."""
+def process_paper(arxiv_id: str, require_str: bool = False) -> dict:
+    """Đọc dữ liệu M2 của một bài, tính ctx_*, ghép str_*, kiểm tra hợp đồng rồi mới ghi <paper_key>.parquet.
+
+    require_str=True (strict, dùng trong pipeline): bắt buộc có .str.parquet hợp lệ của Tri.
+    Mọi lỗi dữ liệu raise (InputError/ValueError) TRƯỚC khi ghi file, nên không bao giờ có Parquet giả thành công.
+    """
     started = time.perf_counter()
     pdir = C.paper_dir(arxiv_id)
-    candidates = _read_json(pdir / "candidates.json", [])
-    bib_rows = _read_json(pdir / "bibtex_merged.json", [])
-    refs_payload = _read_json(pdir / "refs.json", {})
-    references = refs_payload.get("references", []) if isinstance(refs_payload, dict) else []
-    elements = _read_json(pdir / "elements.json", [])
-    edges = _read_json(pdir / "hierarchy.json", [])
+    candidates = _load_input(pdir / "candidates.json", arxiv_id, list, True, [])
+    refs_payload = _load_input(pdir / "refs.json", arxiv_id, dict, bool(candidates), {})
+    references = refs_payload.get("references", [])
+    if not isinstance(references, list):
+        raise InputError(f"{arxiv_id}: refs.json: 'references' phải là list")
+    bib_rows = _load_input(pdir / "bibtex_merged.json", arxiv_id, list, False, [])
+    elements = _load_input(pdir / "elements.json", arxiv_id, list, False, [])
+    edges = _load_input(pdir / "hierarchy.json", arxiv_id, list, False, [])
+    if any("candidate_id" not in c for c in candidates):
+        raise InputError(f"{arxiv_id}: candidates.json có dòng thiếu candidate_id")
 
     frame = compute_features(candidates, bib_rows, references, elements, edges)
 
-    has_str = False
     str_path = features_path(arxiv_id, ".str")
-    if str_path.exists():
+    has_str = str_path.exists()
+    if has_str:
         frame = merge_string_features(frame, pd.read_parquet(str_path))
-        has_str = True
+    elif require_str:
+        raise InputError(f"{arxiv_id}: thiếu {str_path} (strict yêu cầu feature str_* của Tri)")
     validate_features(frame, candidates)
 
     out = features_path(arxiv_id)
@@ -375,7 +486,13 @@ def process_paper(arxiv_id: str) -> dict:
     tmp = out.with_suffix(out.suffix + ".tmp")
     frame.to_parquet(tmp, index=False)
     tmp.replace(out)
+
+    # Thống kê cho N09: bản ghi reference trùng arXiv ID và cặp (entry, ref) bị lặp.
+    ref_ids = [C.normalize_arxiv_id(r.get("ref_arxiv_id")) for r in references if r.get("ref_arxiv_id")]
+    duplicate_pairs = int(frame.duplicated(subset=["citation_key", "ref_arxiv_id"]).sum()) if len(frame) else 0
     return {"arxiv_id": arxiv_id, "rows": len(frame), "has_str": has_str,
+            "columns": list(frame.columns),
+            "duplicate_ref_ids": len(ref_ids) - len(set(ref_ids)), "duplicate_candidate_pairs": duplicate_pairs,
             "seconds": round(time.perf_counter() - started, 4)}
 
 
@@ -398,32 +515,58 @@ def _worker_init(data_dir: str) -> None:
     C.DATA_DIR = Path(data_dir)  # tiến trình con (spawn) không thừa hưởng DATA_DIR đã ghi đè ở main
 
 
-def _safe_process(arxiv_id: str) -> dict:
+def _safe_process(arxiv_id: str, require_str: bool = False) -> dict:
     try:
-        return process_paper(arxiv_id)
+        return process_paper(arxiv_id, require_str=require_str)
     except Exception as error:  # noqa: BLE001 - một bài lỗi không làm dừng cả lô
         return {"arxiv_id": arxiv_id, "error": f"{type(error).__name__}: {error}"}
 
 
-def build_all(ids: Optional[Iterable[str]] = None, workers: int = 1) -> dict:
+def _process_strict(arxiv_id: str) -> dict:  # hàm mức module để ProcessPoolExecutor pickle được
+    return _safe_process(arxiv_id, require_str=True)
+
+
+def build_all(ids: Optional[Iterable[str]] = None, workers: int = 1, require_str: bool = False) -> dict:
+    """Chạy nhiều bài; lỗi từng bài được cô lập và đếm trong summary['errors'] (không dừng giữa chừng)."""
     ids = list(ids) if ids else discover_ids()
     started = time.time()
+    func = _process_strict if require_str else _safe_process
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init,
                                  initargs=(str(C.DATA_DIR),)) as pool:
-            results = list(pool.map(_safe_process, ids, chunksize=16))
+            results = list(pool.map(func, ids, chunksize=16))
     else:
-        results = [_safe_process(i) for i in ids]
+        results = [func(i) for i in ids]
     errors = [r for r in results if "error" in r]
     for item in errors[:20]:
         log.error("%s: %s", item["arxiv_id"], item["error"])
+    ok = [r for r in results if "error" not in r]
+    column_sets = {tuple(r["columns"]) for r in ok}
     summary = {
-        "papers": len(ids), "ok": len(ids) - len(errors), "errors": len(errors),
-        "rows": sum(r.get("rows", 0) for r in results),
-        "with_str_features": sum(bool(r.get("has_str")) for r in results),
+        "papers": len(ids), "ok": len(ok), "errors": len(errors),
+        "failed_ids": [r["arxiv_id"] for r in errors],
+        "rows": sum(r.get("rows", 0) for r in ok),
+        "with_str_features": sum(bool(r.get("has_str")) for r in ok),
+        "column_sets": len(column_sets),
+        # strict: mọi bảng phải cùng tập cột (str_* khác nhau giữa các bài làm model gặp bảng không đồng nhất)
+        "columns_consistent": len(column_sets) <= 1,
+        "papers_with_duplicate_ref_ids": sum(r.get("duplicate_ref_ids", 0) > 0 for r in ok),
+        "duplicate_candidate_pairs": sum(r.get("duplicate_candidate_pairs", 0) for r in ok),
         "seconds": round(time.time() - started, 1),
     }
+    if not summary["columns_consistent"]:
+        log.error("Các bảng feature không cùng tập cột (%d tập khác nhau)", len(column_sets))
     log.info("XONG: %s", summary)
+    return summary
+
+
+def run_stage(ids: Optional[Iterable[str]] = None, workers: int = 1, require_str: bool = True,
+              allow_errors: bool = False) -> dict:
+    """Bước `features` cho run_m3.py. Mặc định strict; raise FeatureStageError nếu còn bài lỗi
+    hoặc bảng không cùng tập cột, để runner KHÔNG chuyển sang bước model."""
+    summary = build_all(ids, workers, require_str)
+    if (summary["errors"] or (require_str and not summary["columns_consistent"])) and not allow_errors:
+        raise FeatureStageError(summary)
     return summary
 
 
@@ -433,13 +576,20 @@ def main(argv=None) -> None:
     ap.add_argument("--ids", nargs="*", help="chỉ xử lý các arXiv ID này (mặc định: mọi bài có candidates.json)")
     ap.add_argument("--limit", type=int, help="chỉ xử lý N bài đầu (chạy thử)")
     ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--require-str", action="store_true",
+                    help="strict: bắt buộc có .str.parquet hợp lệ của Tri cho mọi bài")
+    ap.add_argument("--allow-errors", action="store_true", help="vẫn thoát mã 0 khi có bài lỗi")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     C.DATA_DIR = args.corpus_dir.expanduser().resolve()
     ids = args.ids or discover_ids()
     if args.limit:
         ids = ids[:args.limit]
-    print(json.dumps(build_all(ids, args.workers), indent=2, ensure_ascii=False))
+    summary = build_all(ids, args.workers, args.require_str)
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    failed = summary["errors"] > 0 or (args.require_str and not summary["columns_consistent"])
+    if failed and not args.allow_errors:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
