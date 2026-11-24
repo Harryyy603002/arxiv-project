@@ -228,79 +228,162 @@ def hierarchy_path(arxiv_id: str) -> Path:
 def parse_status_path(arxiv_id: str) -> Path:
     return paper_dir(arxiv_id) / "parse_status.json"
 
-# ---------------------------------------------------------------- M3: member ranges and artifacts
-# Order follows ID.txt: Quoc, Nguyen, Khai, Tri.
+
+# ---------------------------------------------------------------- M3: member ranges & artifact paths
+# Shared by M1/M2/M3.
 MEMBERS = ["Quoc", "Nguyen", "Khai", "Tri"]
-MEMBER_RANGES = {
+
+MEMBER_RANGES: Dict[str, Tuple[str, str]] = {
     "Quoc": ("2512.23231", "2601.03155"),
     "Nguyen": ("2602.04870", "2602.09869"),
     "Khai": ("2603.00580", "2603.05579"),
     "Tri": ("2606.20734", "2606.25733"),
 }
+
+# Backward compatibility with the original M3 implementation.
 M3_DIR: Path = DATA_DIR / "m3"
 
-# Moved here from run_m1.py so M1 and M3 share exactly one range parser.
-_RANGE_DOTTED_RE = re.compile(r"^(\d{4}\.\d{4,5})\s*-\s*(\d{4}\.\d{4,5})$")
-_RANGE_COMPACT_RE = re.compile(r"^(\d{4})(\d{5})\s*-\s*(\d{4})(\d{5})$")
+_RANGE_DOTTED_RE = re.compile(
+    r"^(\d{4}\.\d{4,5})\s*-\s*(\d{4}\.\d{4,5})$"
+)
+_RANGE_COMPACT_RE = re.compile(
+    r"^(\d{4})(\d{4,5})\s*-\s*(\d{4})(\d{4,5})$"
+)
 
-def _parse_range(raw: str):
-    """Parse dotted/compact ID.txt ranges, e.g. 260204870-260209869."""
-    match = _RANGE_DOTTED_RE.match(str(raw).strip())
+
+def _parse_range(raw: str) -> Optional[Tuple[str, str]]:
+    """Parse dotted or compact ID ranges."""
+    value = str(raw).strip()
+
+    match = _RANGE_DOTTED_RE.fullmatch(value)
     if match:
         return match.group(1), match.group(2)
-    match = _RANGE_COMPACT_RE.match(str(raw).strip())
+
+    match = _RANGE_COMPACT_RE.fullmatch(value)
     if match:
-        return f"{match.group(1)}.{match.group(2)}", f"{match.group(3)}.{match.group(4)}"
+        return (
+            f"{match.group(1)}.{match.group(2)}",
+            f"{match.group(3)}.{match.group(4)}",
+        )
+
     return None
+
 
 def id_key(arxiv_id: str) -> Tuple[int, int]:
-    """Comparable (YYMM, numeric suffix) key; strip URL/version first."""
-    value = normalize_arxiv_id(arxiv_id) or str(arxiv_id).strip()
-    if re.fullmatch(r"\d{9}", value):
-        value = value[:4] + "." + value[4:]
-    match = _NEW_ID_RE.match(value)
+    """Convert an arXiv ID into a sortable (YYMM, numeric suffix) pair."""
+    base = normalize_arxiv_id(arxiv_id)
+
+    if base is None:
+        raise ValueError(f"arXiv ID không hợp lệ: {arxiv_id!r}")
+
+    # Support compact IDs such as 260204870.
+    if re.fullmatch(r"\d{8,9}", base):
+        base = f"{base[:4]}.{base[4:]}"
+
+    match = _NEW_ID_RE.fullmatch(base)
     if not match:
-        raise ValueError(f"ID không ở dạng YYMM.NNNN[N]: {arxiv_id!r}")
-    return int(match.group("yymm")), int(match.group("num"))
+        raise ValueError(
+            f"ID không phải dạng YYMM.NNNN[N]: {arxiv_id!r}"
+        )
+
+    return int(match["yymm"]), int(match["num"])
+
 
 def in_range(arxiv_id: str, member: str) -> bool:
-    """Check an ID against a member range using numeric month/ID ordering."""
+    """Check whether an arXiv ID belongs to a member's inclusive range."""
     if member not in MEMBER_RANGES:
-        raise KeyError(f"Member không hợp lệ: {member}; chọn một trong {MEMBERS}")
+        raise KeyError(
+            f"Thành viên không hợp lệ: {member!r}. "
+            f"Chọn trong {MEMBERS}"
+        )
+
+    try:
+        key = id_key(arxiv_id)
+    except (TypeError, ValueError):
+        return False
+
     start, end = MEMBER_RANGES[member]
-    return id_key(start) <= id_key(arxiv_id) <= id_key(end)
+    return id_key(start) <= key <= id_key(end)
+
 
 def member_of(arxiv_id: str) -> Optional[str]:
+    """Return the member responsible for an arXiv ID."""
     for member in MEMBERS:
-        try:
-            if in_range(arxiv_id, member):
-                return member
-        except ValueError:
-            return None
+        if in_range(arxiv_id, member):
+            return member
     return None
 
-def m3_labels_dir() -> Path:
-    return M3_DIR / "labels"
 
-def labels_path(arxiv_id: str) -> Path:
-    return m3_labels_dir() / f"{paper_key(arxiv_id)}.json"
+def m3_dir(data_dir: Optional[Path] = None) -> Path:
+    """Return M3 artifact directory."""
+    root = Path(data_dir) if data_dir is not None else DATA_DIR
+    return root / "m3"
 
-def features_path(arxiv_id: str) -> Path:
-    return M3_DIR / "features" / f"{paper_key(arxiv_id)}.parquet"
 
-def split_path() -> Path:
-    return M3_DIR / "split.json"
+def m3_labels_dir(data_dir: Optional[Path] = None) -> Path:
+    """Return the M3 labels directory."""
+    return m3_dir(data_dir) / "labels"
 
-def scores_path() -> Path:
-    return M3_DIR / "scores.parquet"
 
-def predictions_path() -> Path:
-    return M3_DIR / "predictions.parquet"
+def labels_path(
+    arxiv_id: str,
+    data_dir: Optional[Path] = None
+) -> Path:
+    return (
+        m3_labels_dir(data_dir)
+        / f"{paper_key(arxiv_id)}.json"
+    )
 
-def poster_inputs_dir() -> Path:
-    return M3_DIR / "poster_inputs"
+
+def str_features_path(
+    arxiv_id: str,
+    data_dir: Optional[Path] = None
+) -> Path:
+    return (
+        m3_dir(data_dir)
+        / "features"
+        / f"{paper_key(arxiv_id)}.str.parquet"
+    )
+
+
+def features_path(
+    arxiv_id: str,
+    data_dir: Optional[Path] = None
+) -> Path:
+    return (
+        m3_dir(data_dir)
+        / "features"
+        / f"{paper_key(arxiv_id)}.parquet"
+    )
+
+
+def split_path(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "split.json"
+
+
+def scores_path(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "scores.parquet"
+
+
+def predictions_path(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "predictions.parquet"
+
+
+def poster_inputs_dir(data_dir: Optional[Path] = None) -> Path:
+    return m3_dir(data_dir) / "poster_inputs"
 
 
 if __name__ == "__main__":
-    ids = list(iter_id_range(*parse_id_range("2602.04870-2602.09869")))
-    print(len(ids), ids[0], ids[-1], paper_key("hep-th/9901001"), version_dir("2310.12345", 2))
+    ids = list(
+        iter_id_range(
+            *parse_id_range("2602.04870-2602.09869")
+        )
+    )
+    print(
+        len(ids),
+        ids[0],
+        ids[-1],
+        paper_key("hep-th/9901001"),
+        version_dir("2310.12345", 2)
+    )
+
