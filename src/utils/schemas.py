@@ -19,7 +19,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 import pyarrow as pa
@@ -79,6 +79,15 @@ BIBTEX_SCHEMA = pa.schema([
 ])
 
 # Milestone 3
+SCORES_SCHEMA = pa.schema([
+    pa.field("candidate_id", pa.string(), nullable=False),
+    pa.field("arxiv_id", pa.string(), nullable=False),
+    pa.field("citation_key", pa.string(), nullable=False),
+    pa.field("ref_arxiv_id", pa.string(), nullable=False),
+    pa.field("score", pa.float64(), nullable=False),
+    pa.field("model_version", pa.string(), nullable=False),
+])
+
 PREDICTIONS_SCHEMA = pa.schema([
     pa.field("arxiv_id", pa.string(), nullable=False),
     pa.field("partition", DICT_STRING, nullable=False),
@@ -285,80 +294,253 @@ def validate_candidate_rows(rows: list[dict]) -> None:
                 raise ValueError(f"candidate row {index} has invalid {field}")
 
 
+
+VALID_PARTITIONS = {"train", "valid", "test"}
+CAND_COLS = ("cand_1", "cand_2", "cand_3", "cand_4", "cand_5")
+
+
+def _is_null_value(value: object) -> bool:
+    """Check None, NaN and pandas nullable values safely."""
+    if value is None:
+        return True
+
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_predictions(
-    rows,
-    allowed_arxiv_ids=None,
-    partitions_by_id=None,
-) -> None:
+    predictions_df: pd.DataFrame | pa.Table | Iterable[dict],
+    split_ids: Optional[Iterable[str]] = None,
+    *,
+    allowed_arxiv_ids: Optional[Iterable[str]] = None,
+    partitions_by_id: Optional[Dict[str, str]] = None,
+    raise_on_error: Optional[bool] = None,
+) -> List[str]:
     """Validate M3 predictions against PREDICTIONS_SCHEMA and split.json.
 
-    Accepts pandas DataFrame, PyArrow Table, or list[dict]. Raises a
-    descriptive ValueError on the first batch of contract violations. A row
-    must represent a positive ground-truth entry; null/unannotated entries
-    must never be written to predictions.parquet.
+    Supports:
+      - pandas DataFrame
+      - PyArrow Table
+      - Iterable[dict]
+
+    Checks:
+      1. Exactly 9 columns according to PREDICTIONS_SCHEMA.
+      2. Required fields are not null or empty.
+      3. partition belongs to train/valid/test.
+      4. No duplicate candidate IDs within one row.
+      5. No duplicate (arxiv_id, citation_key).
+      6. Optional validation against split IDs.
+      7. Optional validation of partition assignments.
+
+    Compatibility:
+      - split_ids: legacy main API, returns a list of errors.
+      - allowed_arxiv_ids / partitions_by_id: PR API, raises ValueError
+        when validation fails by default.
+      - raise_on_error explicitly overrides this behavior.
     """
-    if isinstance(rows, pa.Table):
-        if not rows.schema.equals(PREDICTIONS_SCHEMA):
-            raise ValueError(
-                "Predictions Arrow schema mismatch: expected "
-                f"{PREDICTIONS_SCHEMA}, got {rows.schema}"
-            )
-        records = rows.to_pylist()
-        columns = rows.schema.names
-    elif isinstance(rows, pd.DataFrame):
-        records = rows.to_dict("records")
-        columns = list(rows.columns)
+
+    errors: List[str] = []
+
+    # 1. Convert input into records.
+    if isinstance(predictions_df, pa.Table):
+        records = predictions_df.to_pylist()
+        columns = predictions_df.column_names
+
+        # Parquet may return partition as string instead of dictionary string.
+        for field in PREDICTIONS_SCHEMA:
+            if field.name not in columns:
+                continue
+
+            actual_type = predictions_df.schema.field(field.name).type
+
+            if field.name == "partition":
+                compatible = (
+                    pa.types.is_string(actual_type)
+                    or (
+                        pa.types.is_dictionary(actual_type)
+                        and pa.types.is_string(actual_type.value_type)
+                    )
+                )
+            else:
+                compatible = actual_type == field.type
+
+            if not compatible:
+                errors.append(
+                    f"Column '{field.name}' sai kiểu dữ liệu: "
+                    f"expected {field.type}, got {actual_type}"
+                )
+
+    elif isinstance(predictions_df, pd.DataFrame):
+        records = predictions_df.to_dict("records")
+        columns = list(predictions_df.columns)
+
     else:
-        records = list(rows)
-        columns = list(records[0].keys()) if records else PREDICTIONS_SCHEMA.names
+        records = list(predictions_df)
+        columns = (
+            list(records[0].keys())
+            if records
+            else PREDICTIONS_SCHEMA.names
+        )
 
-    expected = PREDICTIONS_SCHEMA.names
-    missing = [name for name in expected if name not in columns]
-    extra = [name for name in columns if name not in expected]
-    errors = []
-    if missing:
-        errors.append(f"Thiếu cột: {missing}")
-    if extra:
-        errors.append(f"Cột ngoài PREDICTIONS_SCHEMA: {extra}")
+    # 2. Validate schema columns.
+    expected_columns = PREDICTIONS_SCHEMA.names
 
+    missing_cols = [
+        col for col in expected_columns if col not in columns
+    ]
+    extra_cols = [
+        col for col in columns if col not in expected_columns
+    ]
+
+    if missing_cols:
+        errors.append(f"Thiếu cột: {missing_cols}")
+
+    if extra_cols:
+        errors.append(f"Cột ngoài PREDICTIONS_SCHEMA: {extra_cols}")
+
+    # 3. Normalize allowed paper IDs.
+    split_allowed = (
+        {str(x).strip() for x in split_ids}
+        if split_ids is not None
+        else None
+    )
+
+    explicit_allowed = (
+        {str(x).strip() for x in allowed_arxiv_ids}
+        if allowed_arxiv_ids is not None
+        else None
+    )
+
+    if (
+        split_allowed is not None
+        and explicit_allowed is not None
+        and split_allowed != explicit_allowed
+    ):
+        errors.append(
+            "split_ids và allowed_arxiv_ids có nội dung khác nhau."
+        )
+
+    allowed = (
+        explicit_allowed
+        if explicit_allowed is not None
+        else split_allowed
+    )
+
+    partition_lookup = (
+        {
+            str(key).strip(): str(value).strip()
+            for key, value in partitions_by_id.items()
+        }
+        if partitions_by_id is not None
+        else None
+    )
+
+    # 4. Validate individual rows.
     seen_entries = set()
+
     for index, row in enumerate(records):
+
         if not isinstance(row, dict):
-            errors.append(f"Dòng {index} không phải dict")
+            errors.append(f"Dòng {index} không phải dict.")
             continue
-        aid = row.get("arxiv_id")
-        partition = row.get("partition")
-        citation_key = row.get("citation_key")
-        groundtruth = row.get("groundtruth_arxiv_id")
 
-        def _is_null(value):
-            if value is None:
-                return True
-            try:
-                result = pd.isna(value)
-                return bool(result) if not hasattr(result, "__len__") else False
-            except (TypeError, ValueError):
-                return False
+        def clean_value(value):
+            if _is_null_value(value):
+                return ""
+            return str(value).strip()
 
-        if _is_null(aid) or not str(aid).strip() or _is_null(citation_key) or not str(citation_key).strip() or _is_null(groundtruth) or not str(groundtruth).strip():
-            errors.append(f"Dòng {index}: arxiv_id/citation_key/groundtruth_arxiv_id phải khác NULL")
-        if partition not in {"train", "valid", "test"}:
-            errors.append(f"Dòng {index}: partition không hợp lệ: {partition!r}")
-        if allowed_arxiv_ids is not None and aid not in allowed_arxiv_ids:
-            errors.append(f"Dòng {index}: {aid} không thuộc split.json")
-        if partitions_by_id is not None and partitions_by_id.get(aid) != partition:
-            errors.append(f"Dòng {index}: partition không khớp split.json cho {aid}")
-        key = (aid, citation_key)
-        if key in seen_entries:
-            errors.append(f"Dòng {index}: entry bị lặp {key}")
-        seen_entries.add(key)
-        candidates = [row.get(f"cand_{i}") for i in range(1, 6)]
-        candidates = [str(value) for value in candidates if not _is_null(value) and str(value).strip()]
+        aid = clean_value(row.get("arxiv_id"))
+        partition = clean_value(row.get("partition"))
+        citation_key = clean_value(row.get("citation_key"))
+        groundtruth = clean_value(
+            row.get("groundtruth_arxiv_id")
+        )
+
+        # Required fields.
+        required = {
+            "arxiv_id": aid,
+            "partition": partition,
+            "citation_key": citation_key,
+            "groundtruth_arxiv_id": groundtruth,
+        }
+
+        for field, value in required.items():
+            if not value:
+                errors.append(
+                    f"Dòng {index}: '{field}' không được NULL/rỗng."
+                )
+
+        # Partition validation.
+        if partition and partition not in VALID_PARTITIONS:
+            errors.append(
+                f"Dòng {index}: partition không hợp lệ: {partition!r}"
+            )
+
+        # Split membership.
+        if allowed is not None and aid and aid not in allowed:
+            errors.append(
+                f"Dòng {index}: {aid} không nằm trong split.json."
+            )
+
+        # Correct partition assignment.
+        if partition_lookup is not None and aid:
+            expected_partition = partition_lookup.get(aid)
+
+            if expected_partition is None:
+                errors.append(
+                    f"Dòng {index}: không tìm thấy {aid} "
+                    "trong partition mapping."
+                )
+            elif partition != expected_partition:
+                errors.append(
+                    f"Dòng {index}: partition '{partition}' "
+                    f"không khớp '{expected_partition}' của {aid}."
+                )
+
+        # Duplicate entry.
+        if aid and citation_key:
+            key = (aid, citation_key)
+
+            if key in seen_entries:
+                errors.append(
+                    f"Dòng {index}: entry bị trùng {key}."
+                )
+
+            seen_entries.add(key)
+
+        # Duplicate candidates.
+        candidates = [
+            clean_value(row.get(col))
+            for col in CAND_COLS
+        ]
+
+        candidates = [value for value in candidates if value]
+
         if len(candidates) != len(set(candidates)):
-            errors.append(f"Dòng {index}: cand_1..cand_5 bị trùng")
+            errors.append(
+                f"Dòng {index}: cand_1..cand_5 bị trùng ứng viên."
+            )
 
-    if errors:
-        raise ValueError("Predictions không hợp lệ:\n- " + "\n- ".join(errors[:50]))
+    # 5. Maintain compatibility with both callers.
+    strict_mode = (
+        raise_on_error
+        if raise_on_error is not None
+        else (
+            allowed_arxiv_ids is not None
+            or partitions_by_id is not None
+        )
+    )
+
+    if errors and strict_mode:
+        raise ValueError(
+            "Predictions không hợp lệ:\n- "
+            + "\n- ".join(errors[:50])
+        )
+
+    return errors
+
 
 
 def main() -> None:
