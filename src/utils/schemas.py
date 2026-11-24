@@ -298,58 +298,245 @@ VALID_PARTITIONS = {"train", "valid", "test"}
 CAND_COLS = ("cand_1", "cand_2", "cand_3", "cand_4", "cand_5")
 
 
+def _is_null_value(value: object) -> bool:
+    """Check None, NaN and pandas nullable values safely."""
+    if value is None:
+        return True
+
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_predictions(
-    predictions_df: pd.DataFrame,
+    predictions_df: pd.DataFrame | pa.Table | Iterable[dict],
     split_ids: Optional[Iterable[str]] = None,
+    *,
+    allowed_arxiv_ids: Optional[Iterable[str]] = None,
+    partitions_by_id: Optional[Dict[str, str]] = None,
+    raise_on_error: Optional[bool] = None,
 ) -> List[str]:
-    """Kiểm tra tính toàn vẹn bảng predictions (§4.7 M3_PLAN.md).
+    """Validate M3 predictions against PREDICTIONS_SCHEMA and split.json.
 
-    Trả về danh sách lỗi (rỗng = hợp lệ):
-      1. Đủ 9 cột của PREDICTIONS_SCHEMA.
-      2. arxiv_id, partition, citation_key, groundtruth_arxiv_id không được NULL/rỗng
-         (mỗi dòng trong predictions chỉ gồm entry có reference đúng).
-      3. partition thuộc {'train', 'valid', 'test'}.
-      4. cand_1..cand_5 không trùng nhau trên cùng một dòng (bỏ qua giá trị null).
-      5. Không trùng khóa (arxiv_id, citation_key).
-      6. Nếu truyền split_ids: mọi arxiv_id phải thuộc tập bài trong split.json.
+    Supports:
+      - pandas DataFrame
+      - PyArrow Table
+      - Iterable[dict]
+
+    Checks:
+      1. Exactly 9 columns according to PREDICTIONS_SCHEMA.
+      2. Required fields are not null or empty.
+      3. partition belongs to train/valid/test.
+      4. No duplicate candidate IDs within one row.
+      5. No duplicate (arxiv_id, citation_key).
+      6. Optional validation against split IDs.
+      7. Optional validation of partition assignments.
+
+    Compatibility:
+      - split_ids: legacy main API, returns a list of errors.
+      - allowed_arxiv_ids / partitions_by_id: PR API, raises ValueError
+        when validation fails by default.
+      - raise_on_error explicitly overrides this behavior.
     """
+
     errors: List[str] = []
-    missing_cols = [c for c in PREDICTIONS_SCHEMA.names if c not in predictions_df.columns]
+
+    # 1. Convert input into records.
+    if isinstance(predictions_df, pa.Table):
+        records = predictions_df.to_pylist()
+        columns = predictions_df.column_names
+
+        # Parquet may return partition as string instead of dictionary string.
+        for field in PREDICTIONS_SCHEMA:
+            if field.name not in columns:
+                continue
+
+            actual_type = predictions_df.schema.field(field.name).type
+
+            if field.name == "partition":
+                compatible = (
+                    pa.types.is_string(actual_type)
+                    or (
+                        pa.types.is_dictionary(actual_type)
+                        and pa.types.is_string(actual_type.value_type)
+                    )
+                )
+            else:
+                compatible = actual_type == field.type
+
+            if not compatible:
+                errors.append(
+                    f"Column '{field.name}' sai kiểu dữ liệu: "
+                    f"expected {field.type}, got {actual_type}"
+                )
+
+    elif isinstance(predictions_df, pd.DataFrame):
+        records = predictions_df.to_dict("records")
+        columns = list(predictions_df.columns)
+
+    else:
+        records = list(predictions_df)
+        columns = (
+            list(records[0].keys())
+            if records
+            else PREDICTIONS_SCHEMA.names
+        )
+
+    # 2. Validate schema columns.
+    expected_columns = PREDICTIONS_SCHEMA.names
+
+    missing_cols = [
+        col for col in expected_columns if col not in columns
+    ]
+    extra_cols = [
+        col for col in columns if col not in expected_columns
+    ]
+
     if missing_cols:
-        errors.append(f"Bảng predictions thiếu cột: {missing_cols}")
-        return errors
+        errors.append(f"Thiếu cột: {missing_cols}")
 
-    if predictions_df.empty:
-        return errors
+    if extra_cols:
+        errors.append(f"Cột ngoài PREDICTIONS_SCHEMA: {extra_cols}")
 
-    for col in ("arxiv_id", "partition", "citation_key", "groundtruth_arxiv_id"):
-        null_mask = predictions_df[col].isna() | (predictions_df[col].astype(str).str.strip() == "")
-        n_null = int(null_mask.sum())
-        if n_null > 0:
-            errors.append(f"Bảng predictions có {n_null} dòng bị NULL/rỗng ở cột '{col}'.")
+    # 3. Normalize allowed paper IDs.
+    split_allowed = (
+        {str(x).strip() for x in split_ids}
+        if split_ids is not None
+        else None
+    )
 
-    parts = set(predictions_df["partition"].dropna().astype(str).unique())
-    bad_parts = parts - VALID_PARTITIONS
-    if bad_parts:
-        errors.append(f"Bảng predictions có partition không hợp lệ: {sorted(bad_parts)}")
+    explicit_allowed = (
+        {str(x).strip() for x in allowed_arxiv_ids}
+        if allowed_arxiv_ids is not None
+        else None
+    )
 
-    dup_keys = int(predictions_df.duplicated(subset=["arxiv_id", "citation_key"]).sum())
-    if dup_keys > 0:
-        errors.append(f"Bảng predictions có {dup_keys} dòng bị trùng khóa (arxiv_id, citation_key).")
+    if (
+        split_allowed is not None
+        and explicit_allowed is not None
+        and split_allowed != explicit_allowed
+    ):
+        errors.append(
+            "split_ids và allowed_arxiv_ids có nội dung khác nhau."
+        )
 
-    dup_cand_rows = 0
-    for row in predictions_df[list(CAND_COLS)].itertuples(index=False):
-        vals = [str(v).strip() for v in row if v is not None and pd.notna(v) and str(v).strip() != ""]
-        if len(vals) != len(set(vals)):
-            dup_cand_rows += 1
-    if dup_cand_rows > 0:
-        errors.append(f"Bảng predictions có {dup_cand_rows} dòng bị trùng ứng viên giữa cand_1..cand_5.")
+    allowed = (
+        explicit_allowed
+        if explicit_allowed is not None
+        else split_allowed
+    )
 
-    if split_ids is not None:
-        allowed = {str(x).strip() for x in split_ids}
-        unknown_ids = set(predictions_df["arxiv_id"].dropna().astype(str)) - allowed
-        if unknown_ids:
-            errors.append(f"Bảng predictions có {len(unknown_ids)} arxiv_id không nằm trong split.json.")
+    partition_lookup = (
+        {
+            str(key).strip(): str(value).strip()
+            for key, value in partitions_by_id.items()
+        }
+        if partitions_by_id is not None
+        else None
+    )
+
+    # 4. Validate individual rows.
+    seen_entries = set()
+
+    for index, row in enumerate(records):
+
+        if not isinstance(row, dict):
+            errors.append(f"Dòng {index} không phải dict.")
+            continue
+
+        def clean_value(value):
+            if _is_null_value(value):
+                return ""
+            return str(value).strip()
+
+        aid = clean_value(row.get("arxiv_id"))
+        partition = clean_value(row.get("partition"))
+        citation_key = clean_value(row.get("citation_key"))
+        groundtruth = clean_value(
+            row.get("groundtruth_arxiv_id")
+        )
+
+        # Required fields.
+        required = {
+            "arxiv_id": aid,
+            "partition": partition,
+            "citation_key": citation_key,
+            "groundtruth_arxiv_id": groundtruth,
+        }
+
+        for field, value in required.items():
+            if not value:
+                errors.append(
+                    f"Dòng {index}: '{field}' không được NULL/rỗng."
+                )
+
+        # Partition validation.
+        if partition and partition not in VALID_PARTITIONS:
+            errors.append(
+                f"Dòng {index}: partition không hợp lệ: {partition!r}"
+            )
+
+        # Split membership.
+        if allowed is not None and aid and aid not in allowed:
+            errors.append(
+                f"Dòng {index}: {aid} không nằm trong split.json."
+            )
+
+        # Correct partition assignment.
+        if partition_lookup is not None and aid:
+            expected_partition = partition_lookup.get(aid)
+
+            if expected_partition is None:
+                errors.append(
+                    f"Dòng {index}: không tìm thấy {aid} "
+                    "trong partition mapping."
+                )
+            elif partition != expected_partition:
+                errors.append(
+                    f"Dòng {index}: partition '{partition}' "
+                    f"không khớp '{expected_partition}' của {aid}."
+                )
+
+        # Duplicate entry.
+        if aid and citation_key:
+            key = (aid, citation_key)
+
+            if key in seen_entries:
+                errors.append(
+                    f"Dòng {index}: entry bị trùng {key}."
+                )
+
+            seen_entries.add(key)
+
+        # Duplicate candidates.
+        candidates = [
+            clean_value(row.get(col))
+            for col in CAND_COLS
+        ]
+
+        candidates = [value for value in candidates if value]
+
+        if len(candidates) != len(set(candidates)):
+            errors.append(
+                f"Dòng {index}: cand_1..cand_5 bị trùng ứng viên."
+            )
+
+    # 5. Maintain compatibility with both callers.
+    strict_mode = (
+        raise_on_error
+        if raise_on_error is not None
+        else (
+            allowed_arxiv_ids is not None
+            or partitions_by_id is not None
+        )
+    )
+
+    if errors and strict_mode:
+        raise ValueError(
+            "Predictions không hợp lệ:\n- "
+            + "\n- ".join(errors[:50])
+        )
 
     return errors
 
@@ -393,18 +580,8 @@ def main() -> None:
             "cand_4": None,
             "cand_5": None,
         },
-        {
-            "arxiv_id": "1706.03762",
-            "partition": "train",
-            "citation_key": "unmatched",
-            "groundtruth_arxiv_id": None,
-            "cand_1": None,
-            "cand_2": None,
-            "cand_3": None,
-            "cand_4": None,
-            "cand_5": None,
-        },
     ])
+    validate_predictions(sample_predictions)
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         for name, df in [

@@ -238,30 +238,74 @@ MEMBER_RANGES: Dict[str, Tuple[str, str]] = {
     "Tri": ("2606.20734", "2606.25733"),
 }
 
+# Backward compatibility with the original M3 implementation.
+M3_DIR: Path = DATA_DIR / "m3"
+
+_RANGE_DOTTED_RE = re.compile(
+    r"^(\d{4}\.\d{4,5})\s*-\s*(\d{4}\.\d{4,5})$"
+)
+_RANGE_COMPACT_RE = re.compile(
+    r"^(\d{4})(\d{4,5})\s*-\s*(\d{4})(\d{4,5})$"
+)
+
+
+def _parse_range(raw: str) -> Optional[Tuple[str, str]]:
+    """Parse dotted or compact ID ranges."""
+    value = str(raw).strip()
+
+    match = _RANGE_DOTTED_RE.fullmatch(value)
+    if match:
+        return match.group(1), match.group(2)
+
+    match = _RANGE_COMPACT_RE.fullmatch(value)
+    if match:
+        return (
+            f"{match.group(1)}.{match.group(2)}",
+            f"{match.group(3)}.{match.group(4)}",
+        )
+
+    return None
+
 
 def id_key(arxiv_id: str) -> Tuple[int, int]:
-    """Chuyển arXiv ID mới ('2602.04870v2') thành khóa so sánh (2602, 4870)."""
-    base = normalize_arxiv_id(arxiv_id) or split_version(arxiv_id)[0]
-    m = _NEW_ID_RE.match(base)
-    if not m:
-        raise ValueError(f"ID không phải dạng YYMM.NNNNN: {arxiv_id!r}")
-    return int(m["yymm"]), int(m["num"])
+    """Convert an arXiv ID into a sortable (YYMM, numeric suffix) pair."""
+    base = normalize_arxiv_id(arxiv_id)
+
+    if base is None:
+        raise ValueError(f"arXiv ID không hợp lệ: {arxiv_id!r}")
+
+    # Support compact IDs such as 260204870.
+    if re.fullmatch(r"\d{8,9}", base):
+        base = f"{base[:4]}.{base[4:]}"
+
+    match = _NEW_ID_RE.fullmatch(base)
+    if not match:
+        raise ValueError(
+            f"ID không phải dạng YYMM.NNNN[N]: {arxiv_id!r}"
+        )
+
+    return int(match["yymm"]), int(match["num"])
 
 
 def in_range(arxiv_id: str, member: str) -> bool:
-    """Kiểm tra arxiv_id có nằm trong khoảng ID của thành viên `member` không."""
+    """Check whether an arXiv ID belongs to a member's inclusive range."""
     if member not in MEMBER_RANGES:
-        raise KeyError(f"Thành viên không hợp lệ: {member!r}. Chọn trong {MEMBERS}")
-    lo, hi = MEMBER_RANGES[member]
+        raise KeyError(
+            f"Thành viên không hợp lệ: {member!r}. "
+            f"Chọn trong {MEMBERS}"
+        )
+
     try:
         key = id_key(arxiv_id)
-    except ValueError:
+    except (TypeError, ValueError):
         return False
-    return id_key(lo) <= key <= id_key(hi)
+
+    start, end = MEMBER_RANGES[member]
+    return id_key(start) <= key <= id_key(end)
 
 
 def member_of(arxiv_id: str) -> Optional[str]:
-    """Trả về tên thành viên phụ trách arxiv_id, hoặc None nếu ngoài 4 range."""
+    """Return the member responsible for an arXiv ID."""
     for member in MEMBERS:
         if in_range(arxiv_id, member):
             return member
@@ -269,19 +313,46 @@ def member_of(arxiv_id: str) -> Optional[str]:
 
 
 def m3_dir(data_dir: Optional[Path] = None) -> Path:
-    return (Path(data_dir) if data_dir is not None else DATA_DIR) / "m3"
+    """Return M3 artifact directory."""
+    root = Path(data_dir) if data_dir is not None else DATA_DIR
+    return root / "m3"
 
 
-def labels_path(arxiv_id: str, data_dir: Optional[Path] = None) -> Path:
-    return m3_dir(data_dir) / "labels" / f"{paper_key(arxiv_id)}.json"
+def m3_labels_dir(data_dir: Optional[Path] = None) -> Path:
+    """Return the M3 labels directory."""
+    return m3_dir(data_dir) / "labels"
 
 
-def str_features_path(arxiv_id: str, data_dir: Optional[Path] = None) -> Path:
-    return m3_dir(data_dir) / "features" / f"{paper_key(arxiv_id)}.str.parquet"
+def labels_path(
+    arxiv_id: str,
+    data_dir: Optional[Path] = None
+) -> Path:
+    return (
+        m3_labels_dir(data_dir)
+        / f"{paper_key(arxiv_id)}.json"
+    )
 
 
-def features_path(arxiv_id: str, data_dir: Optional[Path] = None) -> Path:
-    return m3_dir(data_dir) / "features" / f"{paper_key(arxiv_id)}.parquet"
+def str_features_path(
+    arxiv_id: str,
+    data_dir: Optional[Path] = None
+) -> Path:
+    return (
+        m3_dir(data_dir)
+        / "features"
+        / f"{paper_key(arxiv_id)}.str.parquet"
+    )
+
+
+def features_path(
+    arxiv_id: str,
+    data_dir: Optional[Path] = None
+) -> Path:
+    return (
+        m3_dir(data_dir)
+        / "features"
+        / f"{paper_key(arxiv_id)}.parquet"
+    )
 
 
 def split_path(data_dir: Optional[Path] = None) -> Path:
@@ -300,7 +371,17 @@ def poster_inputs_dir(data_dir: Optional[Path] = None) -> Path:
     return m3_dir(data_dir) / "poster_inputs"
 
 
-
 if __name__ == "__main__":
-    ids = list(iter_id_range(*parse_id_range("2602.04870-2602.09869")))
-    print(len(ids), ids[0], ids[-1], paper_key("hep-th/9901001"), version_dir("2310.12345", 2))
+    ids = list(
+        iter_id_range(
+            *parse_id_range("2602.04870-2602.09869")
+        )
+    )
+    print(
+        len(ids),
+        ids[0],
+        ids[-1],
+        paper_key("hep-th/9901001"),
+        version_dir("2310.12345", 2)
+    )
+
