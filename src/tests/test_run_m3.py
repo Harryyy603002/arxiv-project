@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +16,7 @@ from utils import schemas as S
 
 
 def _seed_m1_m2_tables_for_m3_corpus(data_dir: Path) -> None:
-    """Bổ sung 5 bảng M1/M2 (papers, references, elements, hierarchy, bibtex) khớp với m3_corpus."""
+    """Bổ sung 5 bảng M1/M2 và bibtex_merged.json/refs.json hợp lệ cho 4 bài trong m3_corpus."""
     paper_ids = ["2603.00580", "2603.00581", "2603.00582", "2603.00583"]
     papers_df = pd.DataFrame([
         {
@@ -53,15 +54,74 @@ def _seed_m1_m2_tables_for_m3_corpus(data_dir: Path) -> None:
     ])
     S.write_parquet(hierarchy_df, "hierarchy", data_dir / "export" / "hierarchy.parquet")
 
+    bib_keys_by_paper = {
+        "2603.00580": ["cite_a", "cite_b", "cite_null"],
+        "2603.00581": ["cite_c", "cite_d"],
+        "2603.00582": ["cite_v1", "cite_v2"],
+        "2603.00583": ["cite_t1", "cite_missing_cand"],
+    }
     bib_rows = []
-    for aid, keys in [
-        ("2603.00580", ["cite_a", "cite_b", "cite_null"]),
-        ("2603.00581", ["cite_c", "cite_d"]),
-        ("2603.00582", ["cite_v1", "cite_v2"]),
-        ("2603.00583", ["cite_t1", "cite_missing_cand"]),
-    ]:
+    for aid, keys in bib_keys_by_paper.items():
+        pdir = data_dir / C.paper_key(aid)
+        pdir.mkdir(parents=True, exist_ok=True)
+
+        # Bổ sung evidence cho file nhãn auto để đáp ứng validate_label_data (P1)
+        lpath = C.labels_path(aid, data_dir)
+        label_refs: set[str] = set()
+        if lpath.exists():
+            ldata = json.loads(lpath.read_text(encoding="utf-8"))
+            for v in (ldata.get("labels") or {}).values():
+                if v:
+                    label_refs.add(str(v))
+            if ldata.get("source") == "auto" and "evidence" not in ldata:
+                ldata["evidence"] = {
+                    k: "title_exact" for k, v in (ldata.get("labels") or {}).items() if v is not None
+                }
+                lpath.write_text(json.dumps(ldata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        cands = json.loads((pdir / "candidates.json").read_text(encoding="utf-8"))
+        for c in cands:
+            if c.get("title_exact"):
+                c["bib_title"] = "Attention Is All You Need"
+                c["ref_title"] = "Attention Is All You Need"
+                c["bib_title_normalized"] = "attention is all you need"
+                c["ref_title_normalized"] = "attention is all you need"
+            else:
+                c["bib_title"] = "Attention Is All You Need"
+                c["ref_title"] = "Unrelated Reference Title"
+                c["bib_title_normalized"] = "attention is all you need"
+                c["ref_title_normalized"] = "unrelated reference title"
+        (pdir / "candidates.json").write_text(json.dumps(cands, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        refs = [
+            {
+                "ref_arxiv_id": c["ref_arxiv_id"],
+                "ref_s2_id": c["ref_s2_id"],
+                "ref_title": c["ref_title"],
+                "ref_authors": ["Vaswani, Ashish"],
+                "ref_submission_date": "2025-01-01",
+                "ref_venue": "arXiv",
+            }
+            for c in cands
+        ]
+        seen_rids = {r["ref_arxiv_id"] for r in refs}
+        for extra_rid in sorted(label_refs - seen_rids):
+            refs.append({
+                "ref_arxiv_id": extra_rid,
+                "ref_s2_id": f"s2_{extra_rid}",
+                "ref_title": f"Extra Ref {extra_rid}",
+                "ref_authors": ["Author"],
+                "ref_submission_date": "2025-01-01",
+                "ref_venue": "arXiv",
+            })
+        (pdir / "refs.json").write_text(
+            json.dumps({"arxiv_id": aid, "references": refs}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        per_paper_bibs = []
         for ckey in keys:
-            bib_rows.append({
+            row = {
                 "arxiv_id": aid,
                 "citation_key": ckey,
                 "entry_type": "article",
@@ -69,9 +129,19 @@ def _seed_m1_m2_tables_for_m3_corpus(data_dir: Path) -> None:
                 "authors": ["Author"],
                 "year": 2025,
                 "doi": None,
-                "journal": "ArXiv",
+                "journal": "arXiv",
                 "url": None,
-            })
+                "source_versions": ["v1"],
+            }
+            bib_rows.append(row)
+            per_paper_bibs.append(row)
+        (pdir / "bibtex_merged.json").write_text(
+            json.dumps(per_paper_bibs, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (pdir / "elements.json").write_text("[]", encoding="utf-8")
+        (pdir / "hierarchy.json").write_text("[]", encoding="utf-8")
+
     S.write_parquet(pd.DataFrame(bib_rows), "bibtex", data_dir / "export" / "bibtex.parquet")
 
 
@@ -106,6 +176,50 @@ def test_merge_str_and_ctx_features(tmp_path: Path):
     assert len(merged) == 2
 
 
+def test_pick_stage_builds_split_from_m2_stats(tmp_path: Path):
+    """Kiểm tra stage 'pick' gọi trực tiếp m3_pick_papers.build_split để tạo m3/split.json."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    stats = []
+    # Tạo 7 bài trong range 3 (Khai): 5 bài đủ điều kiện manual (refs >= 22) + 2 bài auto
+    for i in range(7):
+        aid = f"2603.{580 + i:05d}"
+        pdir = data_dir / C.paper_key(aid)
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "paper.json").write_text(json.dumps({"arxiv_id": aid}), encoding="utf-8")
+        (pdir / "bibtex_merged.json").write_text(
+            json.dumps([{"citation_key": "k1", "title": "Paper T"}]), encoding="utf-8"
+        )
+        (pdir / "refs.json").write_text(
+            json.dumps({"arxiv_id": aid, "references": [{"ref_arxiv_id": "2501.00001"}]}),
+            encoding="utf-8",
+        )
+        stats.append({
+            "arxiv_id": aid,
+            "canonical_entries": 25 if i < 5 else 10,
+            "references_with_arxiv_id": 25 if i < 5 else 5,
+            "entries_with_candidates": 20 if i < 5 else 5,
+            "candidate_pairs": 40 if i < 5 else 10,
+        })
+    (data_dir / "m2_stats.json").write_text(json.dumps(stats), encoding="utf-8")
+
+    rc = run_m3.main([
+        "--data-dir", str(data_dir),
+        "--stage", "pick",
+        "--member", "3",
+        "--allow-insufficient-auto",
+    ])
+    assert rc == 0
+
+    split_file = C.split_path(data_dir)
+    assert split_file.exists()
+    split_data = json.loads(split_file.read_text(encoding="utf-8"))
+    assert "Khai" in split_data["members"]
+    assert len(split_data["members"]["Khai"]["manual"]) == 5
+    assert len(split_data["members"]["Khai"]["auto"]) == 2
+
+
 def test_run_m3_end_to_end_with_benchmark(m3_corpus: Path):
     _seed_m1_m2_tables_for_m3_corpus(m3_corpus)
 
@@ -125,6 +239,45 @@ def test_run_m3_end_to_end_with_benchmark(m3_corpus: Path):
     assert set(bench["stages_executed"]) == set(run_m3.ALL_STAGES)
     assert "train" in bench["stages_s"] and "publish" in bench["stages_s"]
 
-    # Kiểm tra predictions.parquet được bước predict sinh ra và bước publish đóng gói thành công
     assert C.predictions_path(m3_corpus).exists()
+    assert (C.m3_dir(m3_corpus) / "evaluation_report.json").exists()
     assert (C.m3_dir(m3_corpus) / "hf_export" / "khai" / "README.md").exists()
+
+
+def test_full_p1_p2_p3_p4_integration(m3_corpus: Path):
+    """Kiểm tra tích hợp thật P1 (m3_manual_labeler/predictions/evaluate) + P2 (auto_labeler/string_features) + P3 (context_features) + P4 (model/publish)."""
+    _seed_m1_m2_tables_for_m3_corpus(m3_corpus)
+
+    # Xóa sẵn features/ và file nhãn auto 2603.00581 để stage label + stage features tự sinh mới & vượt qua validate_label_data
+    shutil.rmtree(C.m3_dir(m3_corpus) / "features", ignore_errors=True)
+    C.labels_path("2603.00581", m3_corpus).unlink(missing_ok=True)
+
+    rc = run_m3.main([
+        "--data-dir", str(m3_corpus),
+        "--stage", "all",
+        "--member", "3",
+        "--verify-streaming",
+        "--strict-stages",
+    ])
+    assert rc == 0
+
+    # Stage label sinh lại 2603-00581.json kèm object evidence hợp lệ theo m3_manual_labeler.validate_label_data
+    auto_label_file = C.labels_path("2603.00581", m3_corpus)
+    assert auto_label_file.exists()
+    auto_label_data = json.loads(auto_label_file.read_text(encoding="utf-8"))
+    assert auto_label_data["source"] == "auto"
+    assert isinstance(auto_label_data.get("evidence"), dict)
+    assert (m3_corpus / "labels" / "auto_labels.csv").exists()
+
+    # Stage features sinh đủ 4 cột khóa + 9 cột str_* + 18 cột ctx_* = 31 cột
+    feat_df = pq.read_table(C.features_path("2603.00580", m3_corpus)).to_pandas()
+    str_cols = [c for c in feat_df.columns if c.startswith("str_")]
+    ctx_cols = [c for c in feat_df.columns if c.startswith("ctx_")]
+    assert len(str_cols) == 9
+    assert len(ctx_cols) == 18
+
+    # Stage evaluate chạy trực tiếp trên scores.parquet + labels (luồng P1)
+    eval_report = json.loads((C.m3_dir(m3_corpus) / "evaluation_report.json").read_text(encoding="utf-8"))
+    assert eval_report["evaluation_source"] == "scores.parquet + labels"
+    assert eval_report["overall"]["q"] == 8
+    assert 0.0 <= eval_report["overall"]["mrr@5"] <= 1.0
