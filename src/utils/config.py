@@ -229,10 +229,8 @@ def parse_status_path(arxiv_id: str) -> Path:
     return paper_dir(arxiv_id) / "parse_status.json"
 
 
-# ---------------------------------------------------------------- M3: member ranges & artifact paths
-# Shared by M1/M2/M3.
-MEMBERS = ["Quoc", "Nguyen", "Khai", "Tri"]
-
+# ---------------------------------------------------------------- M3: ID ranges & đường dẫn
+MEMBERS: Tuple[str, ...] = ("Quoc", "Nguyen", "Khai", "Tri")
 MEMBER_RANGES: Dict[str, Tuple[str, str]] = {
     "Quoc": ("2512.23231", "2601.03155"),
     "Nguyen": ("2602.04870", "2602.09869"),

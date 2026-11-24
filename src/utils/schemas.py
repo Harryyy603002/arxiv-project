@@ -294,7 +294,6 @@ def validate_candidate_rows(rows: list[dict]) -> None:
                 raise ValueError(f"candidate row {index} has invalid {field}")
 
 
-
 VALID_PARTITIONS = {"train", "valid", "test"}
 CAND_COLS = ("cand_1", "cand_2", "cand_3", "cand_4", "cand_5")
 
@@ -540,7 +539,6 @@ def validate_predictions(
         )
 
     return errors
-
 
 
 def main() -> None:
