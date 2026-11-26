@@ -123,6 +123,7 @@ def run_pick_stage(
     manual_min_refs: int = 22,
     rebuild_split: bool = False,
     allow_insufficient_auto: bool = False,
+    require_auto_labels: bool = False,
 ) -> Dict[str, Any]:
     """Chạy `m3_pick_papers.build_split` để tạo `m3/split.json` khi chưa có (hoặc khi `--rebuild-split`)."""
     split_file = C.split_path(data_dir)
@@ -161,6 +162,7 @@ def run_pick_stage(
             auto_buffer=auto_buffer,
             manual_min_refs=manual_min_refs,
             allow_insufficient_auto=allow_insufficient_auto,
+            require_auto_labels=require_auto_labels,
         )
         combined_members[m_name] = split_one["members"][m_name]
 
@@ -190,16 +192,37 @@ def run_pick_stage(
 # Stage 2: label (tích hợp m3_auto_labeler của Tri + kiểm tra m3_manual_labeler của Quoc)
 # ---------------------------------------------------------------------------
 
-def run_label_stage(data_dir: Path) -> Dict[str, Any]:
+def _split_ids(data_dir: Path, member: Optional[str]) -> set:
+    """ID các bài trong split.json (manual + auto + valid/test) của một thành viên, hoặc của mọi thành viên."""
+    from matching.m3_bundle import split_paper_ids  # nhập muộn để tránh phụ thuộc vòng khi import
+
+    split_file = C.split_path(data_dir)
+    if not split_file.exists():
+        raise SystemExit(f"--split-only cần {split_file}. Chạy `--stage pick` trước.")
+    members = json.loads(split_file.read_text(encoding="utf-8")).get("members") or {}
+    if member is not None:
+        members = {member: members[member]} if member in members else {}
+    ids: set = set()
+    for info in members.values():
+        ids |= set(split_paper_ids(info))
+    if not ids:
+        raise SystemExit("--split-only: split.json không có bài nào cho thành viên đã chọn.")
+    return ids
+
+
+def run_label_stage(data_dir: Path, only_ids: Optional[set] = None) -> Dict[str, Any]:
     """Chạy bộ gán nhãn tự động (luật nằm trong `m3_auto_labeler.label_corpus`, dùng chung với CLI).
 
     - Ghi `<data_dir>/labels/auto_labels.csv` và `<data_dir>/m3/labels/<paper_key>.json` (source="auto").
     - Không bao giờ đụng vào nhãn source="manual"; nhãn auto cũ được ghi đè bằng kết quả mới.
     - Sau khi gán xong, kiểm tra các bài auto/valid/test trong split.json có nhãn dương hay chưa.
     """
+    paper_dirs = _list_paper_dirs(data_dir)
+    if only_ids is not None:
+        paper_dirs = [d for d in paper_dirs if _paper_arxiv_id(d) in only_ids]
     stats = m3_auto_labeler.label_corpus(
         data_dir,
-        paper_dirs=_list_paper_dirs(data_dir),
+        paper_dirs=paper_dirs,
         paper_id_of=_paper_arxiv_id,
     )
     coverage = check_split_label_coverage(data_dir)
@@ -209,6 +232,8 @@ def run_label_stage(data_dir: Path) -> Dict[str, Any]:
         f"bằng chứng={stats['evidence_counts']}; mơ hồ bỏ qua={stats['n_ambiguous_entries']}); "
         f"ghi {stats['n_json_written']} file m3/labels/*.json, xóa {stats['n_json_removed']} file auto cũ."
     )
+    for line in coverage.get("quota_lines", []):
+        print(f"[m3] {line}")
     for line in coverage["warnings"]:
         print(f"[m3] CẢNH BÁO split: {line}")
     return {"status": "completed", **stats, "split_label_coverage": coverage}
@@ -228,8 +253,26 @@ def check_split_label_coverage(data_dir: Path) -> Dict[str, Any]:
     except (OSError, ValueError):
         return {"checked": 0, "missing": [], "warnings": ["không đọc được split.json"]}
     missing: List[str] = []
+    quota_lines: List[str] = []
+    quota_short: List[str] = []
     checked = 0
     for m_name, info in members.items():
+        need = (info.get("selection_metadata") or {}).get("auto_minimum_by_plan")
+        auto_ids = [str(a) for a in info.get("auto") or []]
+        have = 0
+        for aid in auto_ids:
+            lp = C.labels_path(aid, data_dir)
+            try:
+                labels = (json.loads(lp.read_text(encoding="utf-8")).get("labels") or {}) if lp.exists() else {}
+            except (OSError, ValueError):
+                labels = {}
+            have += int(any(v is not None for v in labels.values()))
+        if need is not None:
+            ok = have >= int(need)
+            quota_lines.append(f"{m_name}: bài auto có nhãn dương = {have}/{len(auto_ids)} trong pool; "
+                               f"cần >= {need} theo đề (10% bài ngoài nhóm gán tay) -> {'ĐẠT' if ok else 'CHƯA ĐẠT'}")
+            if not ok:
+                quota_short.append(f"{m_name}: mới {have} bài auto có nhãn, cần >= {need}")
         ids = set(map(str, info.get("manual") or [])) | set(map(str, info.get("auto") or []))
         for sub in ("valid", "test"):
             for ids_sub in (info.get(sub) or {}).values():
@@ -246,11 +289,11 @@ def check_split_label_coverage(data_dir: Path) -> Dict[str, Any]:
                     positives = 0
             if positives == 0:
                 missing.append(f"{m_name}:{aid}")
-    warnings = []
+    warnings = list(quota_short)
     if missing:
         warnings.append(f"{len(missing)}/{checked} bài trong split chưa có nhãn dương: {missing[:10]}"
                         + (" ..." if len(missing) > 10 else ""))
-    return {"checked": checked, "missing": missing, "warnings": warnings}
+    return {"checked": checked, "missing": missing, "warnings": warnings, "quota_lines": quota_lines}
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +393,7 @@ def _str_features_stale(pdir: Path, str_pq: Path) -> bool:
 
 
 def run_features_stage(data_dir: Path, workers: int = 1, strict: bool = False,
-                       rebuild: bool = False) -> Dict[str, Any]:
+                       rebuild: bool = False, only_ids: Optional[set] = None) -> Dict[str, Any]:
     """Chạy bước features:
       1. Tính `str_*` của Tri (`m3_string_features`) -> `<paper_key>.str.parquet`.
       2. Với các bài có đủ `candidates.json` + `refs.json`, gọi `m3_context_features.run_stage`
@@ -360,6 +403,8 @@ def run_features_stage(data_dir: Path, workers: int = 1, strict: bool = False,
     """
     C.DATA_DIR = data_dir
     paper_dirs = _list_paper_dirs(data_dir)
+    if only_ids is not None:
+        paper_dirs = [d for d in paper_dirs if _paper_arxiv_id(d) in only_ids]
     n_str_built = 0
     ctx_eligible_ids: List[str] = []
 
@@ -414,10 +459,12 @@ def run_pipeline(
     strict_stages: bool = False,
     rebuild_split: bool = False,
     allow_insufficient_auto: bool = False,
+    require_auto_labels: bool = False,
     manual_min_refs: int = 22,
     seed: int = 42,
     workers: int = 1,
     rebuild_features: bool = False,
+    split_only: bool = False,
     bench_out: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Chạy các bước M3 được chọn và ghi benchmark vào <data_dir>/benchmark/m3_benchmark.json."""
@@ -427,6 +474,9 @@ def run_pipeline(
 
     resolved_member = m3_publish_hf.resolve_member(member)
     eval_member_scope = resolved_member or "all"
+
+    only_ids = _split_ids(data_dir, resolved_member) if split_only and any(
+        st in ("label", "features") for st in stages) else None
 
     stage_results: Dict[str, Any] = {}
     rec = PerfRecorder(milestone="m3", watch_dirs=[data_dir])
@@ -442,10 +492,11 @@ def run_pipeline(
                         manual_min_refs=manual_min_refs,
                         rebuild_split=rebuild_split,
                         allow_insufficient_auto=allow_insufficient_auto,
+                        require_auto_labels=require_auto_labels,
                     )
 
                 elif stage == "label":
-                    stage_results["label"] = run_label_stage(data_dir)
+                    stage_results["label"] = run_label_stage(data_dir, only_ids=only_ids)
 
                 elif stage == "features":
                     stage_results["features"] = run_features_stage(
@@ -453,6 +504,7 @@ def run_pipeline(
                         workers=workers,
                         strict=strict_stages,
                         rebuild=rebuild_features,
+                        only_ids=only_ids,
                     )
 
                 elif stage == "train":
@@ -583,6 +635,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--max-shard-rows", type=int, default=None)
     parser.add_argument("--workers", type=int, default=1,
                         help="Số tiến trình song song cho bước features (mặc định: 1)")
+    parser.add_argument("--require-auto-labels", action="store_true",
+                        help="pick: chỉ chọn bài auto đã có ít nhất một nhãn dương (chạy `label` trên toàn bộ data trước, "
+                             "rồi `pick --rebuild-split --require-auto-labels`)")
+    parser.add_argument("--split-only", action="store_true",
+                        help="Chỉ chạy label/features cho các bài trong split.json (khoảng 500 bài auto + 5 bài tay) "
+                             "thay vì mọi bài trong data/; nhanh hơn nhiều và vẫn đủ yêu cầu của đề")
     parser.add_argument("--rebuild-features", action="store_true",
                         help="Tính lại .str.parquet cho mọi bài (mặc định chỉ tính lại khi file cũ hơn dữ liệu/mã)")
     parser.add_argument("--seed", type=int, default=42)
@@ -622,10 +680,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         strict_stages=args.strict_stages,
         rebuild_split=args.rebuild_split,
         allow_insufficient_auto=args.allow_insufficient_auto,
+        require_auto_labels=args.require_auto_labels,
         manual_min_refs=args.manual_min_refs,
         seed=args.seed,
         workers=args.workers,
         rebuild_features=args.rebuild_features,
+        split_only=args.split_only,
         bench_out=args.bench_out,
     )
     return 0

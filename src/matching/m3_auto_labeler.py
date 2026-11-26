@@ -268,6 +268,10 @@ def label_corpus(
 
         result = label_paper_entries(pdir, arxiv_id, min_title_sim)
         if not result["rows"]:
+            # Không còn candidate nào: nhãn auto của lần chạy trước (nếu có) đã lỗi thời, phải xóa.
+            if write_json and source == "auto":
+                label_path.unlink()
+                stats["n_json_removed"] += 1
             continue
         stats["n_papers_labeled"] += 1
         stats["n_ambiguous_entries"] += result["n_ambiguous"]

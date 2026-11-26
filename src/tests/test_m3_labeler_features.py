@@ -207,3 +207,13 @@ def test_high_title_sim_with_first_author_match_is_labeled(tmp_path):
     ref = _ref("2001.00001", "Deep Graph Networks for Vision Tasks!", authors=("Wei Zhang", "Anna Kim"))
     pdir = _write_paper(tmp_path, bib, [ref])
     assert _labels(tmp_path, pdir) == {"b1": "2001.00001"}
+
+
+def test_stale_auto_label_removed_when_paper_no_longer_has_candidates(tmp_path):
+    bib = [_bib("b1", "Deep Graph Networks")]
+    pdir = _write_paper(tmp_path, bib, [_ref("2001.00001", "Deep Graph Networks")])
+    assert _labels(tmp_path, pdir) == {"b1": "2001.00001"}
+    (pdir / "candidates.json").write_text("[]")          # dữ liệu đổi: không còn candidate
+    (pdir / "bibtex_merged.json").write_text("[]")
+    assert _labels(tmp_path, pdir) == {}                  # nhãn auto cũ không được ở lại
+    assert not C.labels_path(PID, tmp_path).exists()
