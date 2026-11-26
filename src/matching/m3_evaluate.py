@@ -350,12 +350,54 @@ def load_ground_truths(
     return records
 
 
+def _group_scores(scores: pd.DataFrame) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Xếp hạng sẵn MỌI entry bằng một lần sort toàn bảng.
+
+    Kết quả: {(arxiv_id chuẩn hóa, citation_key): [{"_ref_norm", "score"}, ...]} (tối đa 100 dòng),
+    đã loại ref rỗng / score NaN, sắp theo score giảm dần rồi _ref_norm, candidate_id tăng dần,
+    và mỗi ref chỉ giữ dòng điểm cao nhất, đúng như cách xếp hạng từng entry trước đây.
+    Trước đây mỗi entry tự lọc + sort lại cả bảng scores (hơn 1 giờ cho 60k entry); cách này
+    chỉ sort một lần.
+    """
+    valid = scores[
+        scores["_ref_norm"].notna()
+        & (scores["_ref_norm"].astype(str).str.strip() != "")
+        & scores["score"].notna()
+    ]
+    frame = pd.DataFrame({
+        "_aid": valid["_arxiv_norm"].astype(str).to_numpy(),
+        "_ck": valid["citation_key"].astype(str).to_numpy(),
+        "_ref_norm": valid["_ref_norm"].astype(str).to_numpy(),
+        "score": valid["score"].to_numpy(),
+    })
+    sort_columns = ["_aid", "_ck", "score", "_ref_norm"]
+    ascending = [True, True, False, True]
+    if "candidate_id" in valid.columns:
+        frame["candidate_id"] = valid["candidate_id"].astype(str).to_numpy()
+        sort_columns.append("candidate_id")
+        ascending.append(True)
+    frame = frame.sort_values(by=sort_columns, ascending=ascending, kind="mergesort")
+    frame = frame.drop_duplicates(subset=["_aid", "_ck", "_ref_norm"], keep="first")
+
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for aid, ck, ref, score in zip(
+        frame["_aid"].tolist(), frame["_ck"].tolist(), frame["_ref_norm"].tolist(), frame["score"].tolist()
+    ):
+        bucket = groups.setdefault((aid, ck), [])
+        if len(bucket) < 100:
+            bucket.append({"_ref_norm": ref, "score": score})
+    return groups
+
+
 def _ranking_for_entry(
     scores: pd.DataFrame,
     arxiv_id: str,
     citation_key: str,
+    groups: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     aid = _normalize_id(arxiv_id)
+    if groups is not None:
+        return groups.get((str(aid), str(citation_key)), [])
     subset = scores[
         (scores["_arxiv_norm"] == aid)
         & (scores["citation_key"].astype(str) == str(citation_key))
@@ -412,9 +454,10 @@ def evaluate_records(
     hit1 = hit5 = no_candidates = 0
     errors: list[dict[str, Any]] = []
 
+    groups = _group_scores(scores)
     for truth in selected:
         ranking = _ranking_for_entry(
-            scores, truth["arxiv_id"], truth["citation_key"]
+            scores, truth["arxiv_id"], truth["citation_key"], groups
         )
         if not ranking:
             no_candidates += 1

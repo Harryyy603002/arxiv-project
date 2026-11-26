@@ -251,3 +251,91 @@ def generate_candidates(
                 diagnostics["kept_identity_only"] = diagnostics.get("kept_identity_only", 0) + int((exact_arxiv or exact_doi) and title_score < min_title_similarity)
 
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# Public identity helpers (thêm ở M3; không đổi hành vi của các hàm cũ).
+# Dùng chung cho m3_auto_labeler và m3_string_features để hai nơi không lệch luật.
+# ---------------------------------------------------------------------------
+
+_ARXIV_ARCHIVES = (
+    "astro-ph|cond-mat|gr-qc|hep-ex|hep-lat|hep-ph|hep-th|math-ph|nucl-ex|nucl-th|quant-ph|"
+    "q-bio|q-fin|physics|nlin|math|cs|stat|eess|econ|alg-geom|chao-dyn|solv-int|patt-sol|adap-org|"
+    "comp-gas|cmp-lg|funct-an|dg-ga|q-alg|supr-con|mtrl-th|acc-phys|atom-ph|chem-ph|ao-sci|bayes-an|plasm-ph"
+)
+# ID cũ (archive/YYMMNNN) chỉ nhận archive thật của arXiv, để không bắt nhầm đường dẫn URL
+# như 'ieeexplore.ieee.org/document/5128907' hay 'jstor.org/stable/2032342'.
+_STRICT_ARXIV_RE = re.compile(
+    r"(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/)?"
+    r"(?<![\d.])((?:\d{4}\.\d{4,5}|(?<![a-z\-])(?:" + _ARXIV_ARCHIVES + r")(?:\.[a-z]{2})?/\d{7})(?:v\d+)?)(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def canonical_arxiv_id(value: object) -> str:
+    """ID chuẩn để so sánh: bỏ version và bỏ subject class của ID cũ (math.GT/0309136 -> math/0309136)."""
+    normalized = normalize_arxiv_id(value) or ""
+    return re.sub(r"^([a-z\-]+)\.[a-z]{2}/", r"\1/", normalized)
+
+
+def _strict_arxiv_ids(*values: object) -> set[str]:
+    """Trích arXiv ID nhưng KHÔNG bắt nhầm số nằm trong DOI/số dài.
+
+    Regex cũ (_ARXIV_RE) không có ranh giới số nên 'https://doi.org/10.1145/792538.792543' cho ra
+    ID giả '2538.79254'. Ở đây: đổi DOI arXiv (10.48550/arXiv.X) thành 'arXiv:X', xóa mọi DOI còn lại,
+    rồi chỉ nhận ID không dính liền với chữ số/dấu chấm phía trước và chữ số phía sau.
+    """
+    found: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).replace("\\", "")
+        text = re.sub(r"10\.48550/arxiv\.", "arxiv:", text, flags=re.IGNORECASE)
+        text = _DOI_RE.sub(" ", text)
+        for match in _STRICT_ARXIV_RE.finditer(text):
+            normalized = canonical_arxiv_id(match.group(1))
+            if normalized:
+                found.add(normalized)
+    return found
+
+
+def bib_arxiv_ids(entry: dict[str, Any]) -> set[str]:
+    """arXiv ID suy ra từ eprint/url/raw_text/howpublished/note của BibTeX entry (đã lọc ID giả từ DOI)."""
+    return _strict_arxiv_ids(
+        entry.get("eprint"), entry.get("url"), entry.get("raw_text"),
+        entry.get("howpublished"), entry.get("note"),
+    )
+
+
+def reference_arxiv_ids(reference: dict[str, Any]) -> set[str]:
+    """arXiv ID của một reference (ref_arxiv_id/arxiv_id/external_ids.ArXiv), dạng chuẩn để so sánh."""
+    return {canonical_arxiv_id(x) for x in _reference_arxiv_ids(reference)} - {""}
+
+
+def bib_dois(entry: dict[str, Any]) -> set[str]:
+    return _bib_dois(entry)
+
+
+def reference_dois(reference: dict[str, Any]) -> set[str]:
+    return _reference_dois(reference)
+
+
+def identity_evidence(bib: dict[str, Any], ref: dict[str, Any]) -> str | None:
+    """Trả về 'eprint' hoặc 'doi' khi (bib, ref) khớp định danh chính xác, ngược lại None."""
+    if bib_arxiv_ids(bib) & reference_arxiv_ids(ref):
+        return "eprint"
+    if bib_dois(bib) & reference_dois(ref):
+        return "doi"
+    return None
+
+
+def eprint_conflict(bib: dict[str, Any], ref: dict[str, Any]) -> bool:
+    """True khi BibTeX khai báo arXiv ID (eprint/url) nhưng KHÔNG có ID nào trùng reference.
+
+    Chỉ dùng trường có cấu trúc (eprint, url) để tránh veto nhầm do ghi chú tự do.
+    Dùng làm veto cho luật theo title: entry đã ghi rõ một arXiv ID khác thì title trùng
+    không đủ để kết luận (vd. cùng tiêu đề nhưng là bài khác / phiên bản mở rộng).
+    """
+    declared = _strict_arxiv_ids(bib.get("eprint"), bib.get("url"))
+    ref_ids = reference_arxiv_ids(ref)
+    return bool(declared) and bool(ref_ids) and not (declared & ref_ids)

@@ -168,6 +168,13 @@ def run_pick_stage(
         print("[m3] stage 'pick': không tìm thấy bài nào thuộc range yêu cầu trong m2_stats.json.")
         return {"status": "empty", "skipped_members": skipped_members}
 
+    if resolved_member is not None and split_file.exists():
+        # --rebuild-split --member X chỉ thay phần của X, giữ nguyên các thành viên khác.
+        try:
+            previous = json.loads(split_file.read_text(encoding="utf-8")).get("members") or {}
+        except (OSError, ValueError):
+            previous = {}
+        combined_members = {**previous, **combined_members}
     merged_split = {"seed": int(seed), "members": combined_members}
     m3_pick_papers._write_json_atomic(split_file, merged_split)
     print(f"[m3] stage 'pick': đã ghi {split_file} cho members={sorted(combined_members.keys())}.")
@@ -183,157 +190,67 @@ def run_pick_stage(
 # Stage 2: label (tích hợp m3_auto_labeler của Tri + kiểm tra m3_manual_labeler của Quoc)
 # ---------------------------------------------------------------------------
 
-def _match_entry_with_evidence(entry_candidates: List[dict]) -> Tuple[str, Optional[str]]:
-    """Áp dụng đúng 3 luật của `m3_auto_labeler._match_entry` và trả về `(ref_arxiv_id, evidence)`.
-
-    `evidence` thuộc tập hợp hợp lệ của `m3_manual_labeler.validate_label_data`:
-    `{"eprint", "doi", "title_exact", "title_fuzzy"}`.
-    """
-    for cand in entry_candidates:
-        feats = m3_string_features.compute_string_features(cand)
-        ref_id = str(cand.get("ref_arxiv_id") or "").strip()
-        if not ref_id:
-            continue
-        if feats["title_exact"]:
-            return ref_id, "title_exact"
-        if feats["title_sim"] >= m3_auto_labeler._HIGH_TITLE and feats["author_sim"] >= m3_auto_labeler._HIGH_AUTHOR:
-            return ref_id, "title_fuzzy"
-        if feats["title_sim"] >= m3_auto_labeler._MED_TITLE and feats["year_exact"]:
-            return ref_id, "title_fuzzy"
-    return "", None
-
-
 def run_label_stage(data_dir: Path) -> Dict[str, Any]:
-    """Chạy bộ gán nhãn tự động của Tri trên các bài trong corpus.
+    """Chạy bộ gán nhãn tự động (luật nằm trong `m3_auto_labeler.label_corpus`, dùng chung với CLI).
 
-    - Ghi `<data_dir>/labels/auto_labels.csv` (tương thích `m3_auto_labeler.py`).
-    - Đồng thời ghi `<data_dir>/m3/labels/<paper_key>.json` (đủ `source="auto"`, `labeler`,
-      `labels`, `evidence`, không trùng `ref_arxiv_id` trong cùng một bài và khớp
-      `m3_manual_labeler.validate_label_data`) cho những bài chưa có file nhãn trong `m3/labels/`.
-    - Tuyệt đối không ghi đè file nhãn đã có `source="manual"`.
+    - Ghi `<data_dir>/labels/auto_labels.csv` và `<data_dir>/m3/labels/<paper_key>.json` (source="auto").
+    - Không bao giờ đụng vào nhãn source="manual"; nhãn auto cũ được ghi đè bằng kết quả mới.
+    - Sau khi gán xong, kiểm tra các bài auto/valid/test trong split.json có nhãn dương hay chưa.
     """
-    paper_dirs = _list_paper_dirs(data_dir)
-    all_csv_rows: List[dict] = []
-    n_papers_labeled = 0
-    n_json_written = 0
-    n_matched_entries = 0
-
-    for pdir in paper_dirs:
-        arxiv_id = _paper_arxiv_id(pdir)
-        label_json_path = C.labels_path(arxiv_id, data_dir)
-
-        existing_source = None
-        if label_json_path.exists():
-            try:
-                existing_data = json.loads(label_json_path.read_text(encoding="utf-8"))
-                existing_source = str(existing_data.get("source") or "").lower()
-            except (OSError, ValueError):
-                pass
-        if existing_source == "manual":
-            continue
-
-        candidates = m3_auto_labeler._candidates_for_paper(pdir)
-        if not candidates:
-            continue
-
-        groups: Dict[str, List[dict]] = {}
-        for cand in candidates:
-            key = str(cand.get("citation_key") or "").strip()
-            if key:
-                groups.setdefault(key, []).append(cand)
-
-        if not groups:
-            continue
-
-        n_papers_labeled += 1
-        bib_rows = []
-        bib_file = pdir / "bibtex_merged.json"
-        if bib_file.exists():
-            try:
-                raw_bib = json.loads(bib_file.read_text(encoding="utf-8"))
-                if isinstance(raw_bib, list):
-                    bib_rows = raw_bib
-            except (OSError, ValueError):
-                pass
-        valid_bib_keys = {str(b.get("citation_key")) for b in bib_rows if b.get("citation_key")} if bib_rows else None
-
-        refs_rows = []
-        refs_file = pdir / "refs.json"
-        if refs_file.exists():
-            try:
-                raw_refs = json.loads(refs_file.read_text(encoding="utf-8"))
-                refs_rows = raw_refs.get("references", []) if isinstance(raw_refs, dict) else raw_refs
-                if not isinstance(refs_rows, list):
-                    refs_rows = []
-            except (OSError, ValueError):
-                pass
-
-        labels_map: Dict[str, Optional[str]] = {}
-        evidence_map: Dict[str, str] = {}
-        used_ref_ids: set[str] = set()
-
-        for ckey, cands in sorted(groups.items()):
-            cands_sorted = sorted(cands, key=lambda c: float(c.get("title_similarity") or 0.0), reverse=True)
-            matched_ref, ev = _match_entry_with_evidence(cands_sorted)
-            norm_ref = (C.normalize_arxiv_id(matched_ref) or matched_ref) if matched_ref else ""
-
-            all_csv_rows.append({
-                "arxiv_id": arxiv_id,
-                "citation_key": ckey,
-                "groundtruth_arxiv_id": norm_ref,
-            })
-
-            if not norm_ref or ev is None:
-                continue
-            if valid_bib_keys is not None and ckey not in valid_bib_keys:
-                continue
-            # M3_PLAN §4.3 & m3_manual_labeler.validate_label_data: mỗi ref_arxiv_id chỉ gán cho 1 entry/bài
-            if norm_ref in used_ref_ids:
-                continue
-
-            used_ref_ids.add(norm_ref)
-            labels_map[ckey] = norm_ref
-            evidence_map[ckey] = ev
-            n_matched_entries += 1
-
-        if not label_json_path.exists() and labels_map:
-            payload = {
-                "arxiv_id": arxiv_id,
-                "source": "auto",
-                "labeler": "auto_v1",
-                "labels": labels_map,
-                "evidence": evidence_map,
-            }
-            if bib_rows and refs_rows:
-                val_errors = m3_manual_labeler.validate_label_data(payload, bib_rows, refs_rows)
-                if val_errors:
-                    print(f"[m3] stage 'label': cảnh báo bỏ qua {arxiv_id} do lỗi kiểm tra nhãn: {val_errors[:3]}")
-                    continue
-            label_json_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = label_json_path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(label_json_path)
-            n_json_written += 1
-
-    csv_out = data_dir / "labels" / "auto_labels.csv"
-    csv_out.parent.mkdir(parents=True, exist_ok=True)
-    with csv_out.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=["arxiv_id", "citation_key", "groundtruth_arxiv_id"])
-        writer.writeheader()
-        writer.writerows(all_csv_rows)
-
-    print(
-        f"[m3] stage 'label': đã quét {len(paper_dirs)} bài, gán nhãn tự động {n_papers_labeled} bài "
-        f"({n_matched_entries} entry khớp, ghi mới {n_json_written} file m3/labels/*.json)."
+    stats = m3_auto_labeler.label_corpus(
+        data_dir,
+        paper_dirs=_list_paper_dirs(data_dir),
+        paper_id_of=_paper_arxiv_id,
     )
-    return {
-        "status": "completed",
-        "n_papers_scanned": len(paper_dirs),
-        "n_papers_labeled": n_papers_labeled,
-        "n_matched_entries": n_matched_entries,
-        "n_json_written": n_json_written,
-        "csv_path": str(csv_out),
-    }
+    coverage = check_split_label_coverage(data_dir)
+    print(
+        f"[m3] stage 'label': quét {stats['n_papers_scanned']} bài, bỏ qua {stats['n_manual_skipped']} bài nhãn tay; "
+        f"gán nhãn tự động {stats['n_papers_labeled']} bài ({stats['n_matched_entries']} entry; "
+        f"bằng chứng={stats['evidence_counts']}; mơ hồ bỏ qua={stats['n_ambiguous_entries']}); "
+        f"ghi {stats['n_json_written']} file m3/labels/*.json, xóa {stats['n_json_removed']} file auto cũ."
+    )
+    for line in coverage["warnings"]:
+        print(f"[m3] CẢNH BÁO split: {line}")
+    return {"status": "completed", **stats, "split_label_coverage": coverage}
+
+
+def check_split_label_coverage(data_dir: Path) -> Dict[str, Any]:
+    """Báo các bài trong split.json (manual/auto/valid/test) chưa có nhãn dương nào.
+
+    `pick` chạy trước `label` nên có thể chọn trúng bài auto không gán được nhãn; phải biết sớm
+    để chọn lại (xem `--rebuild-split`), thay vì phát hiện ở bước evaluate.
+    """
+    split_file = C.split_path(data_dir)
+    if not split_file.exists():
+        return {"checked": 0, "missing": [], "warnings": []}
+    try:
+        members = (json.loads(split_file.read_text(encoding="utf-8")).get("members") or {})
+    except (OSError, ValueError):
+        return {"checked": 0, "missing": [], "warnings": ["không đọc được split.json"]}
+    missing: List[str] = []
+    checked = 0
+    for m_name, info in members.items():
+        ids = set(map(str, info.get("manual") or [])) | set(map(str, info.get("auto") or []))
+        for sub in ("valid", "test"):
+            for ids_sub in (info.get(sub) or {}).values():
+                ids |= set(map(str, ids_sub if isinstance(ids_sub, list) else [ids_sub]))
+        for aid in sorted(ids):
+            checked += 1
+            label_path = C.labels_path(aid, data_dir)
+            positives = 0
+            if label_path.exists():
+                try:
+                    labels = (json.loads(label_path.read_text(encoding="utf-8")).get("labels") or {})
+                    positives = sum(v is not None for v in labels.values())
+                except (OSError, ValueError):
+                    positives = 0
+            if positives == 0:
+                missing.append(f"{m_name}:{aid}")
+    warnings = []
+    if missing:
+        warnings.append(f"{len(missing)}/{checked} bài trong split chưa có nhãn dương: {missing[:10]}"
+                        + (" ..." if len(missing) > 10 else ""))
+    return {"checked": checked, "missing": missing, "warnings": warnings}
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +258,10 @@ def run_label_stage(data_dir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def build_paper_str_features_parquet(pdir: Path, data_dir: Path) -> Optional[Path]:
-    """Tính 9 cột `str_*` từ `m3_string_features.compute_string_features` (Tri) và ghi `.str.parquet`."""
+    """Tính các cột `str_*` (m3_string_features.STR_FEATURE_NAMES) và ghi `.str.parquet`.
+
+    Giá trị thiếu giữ nguyên là NaN (null trong Parquet), không điền 0.0.
+    """
     cand_file = pdir / "candidates.json"
     if not cand_file.exists():
         return None
@@ -352,92 +272,40 @@ def build_paper_str_features_parquet(pdir: Path, data_dir: Path) -> Optional[Pat
     if not isinstance(candidates, list):
         return None
 
-    arxiv_id = _paper_arxiv_id(pdir)
-    bib_by_key: Dict[str, dict] = {}
-    bib_file = pdir / "bibtex_merged.json"
-    if bib_file.exists():
-        try:
-            bib_rows = json.loads(bib_file.read_text(encoding="utf-8"))
-            if isinstance(bib_rows, list):
-                bib_by_key = {str(r.get("citation_key")): r for r in bib_rows if isinstance(r, dict)}
-        except (OSError, ValueError):
-            pass
-
-    ref_by_s2: Dict[str, dict] = {}
-    ref_by_id: Dict[str, dict] = {}
-    refs_file = pdir / "refs.json"
-    if refs_file.exists():
-        try:
-            refs_payload = json.loads(refs_file.read_text(encoding="utf-8"))
-            refs_list = refs_payload.get("references", []) if isinstance(refs_payload, dict) else refs_payload
-            if isinstance(refs_list, list):
-                for r in refs_list:
-                    if not isinstance(r, dict):
-                        continue
-                    if r.get("ref_s2_id"):
-                        ref_by_s2[str(r["ref_s2_id"])] = r
-                    if r.get("ref_arxiv_id"):
-                        norm_id = C.normalize_arxiv_id(str(r["ref_arxiv_id"])) or str(r["ref_arxiv_id"])
-                        ref_by_id.setdefault(norm_id, r)
-        except (OSError, ValueError):
-            pass
-
-    str_feature_names = (
-        "title_sim",
-        "author_sim",
-        "title_exact",
-        "title_jaccard",
-        "title_len_ratio",
-        "year_exact",
-        "year_close",
-        "first_author_match",
-        "venue_sim",
-    )
+    bib_by_key, ref_index = m3_string_features.load_paper_context(pdir)
+    names = m3_string_features.STR_FEATURE_NAMES
 
     rows: List[dict] = []
     for cand in candidates:
-        enriched = dict(cand)
-        bib = bib_by_key.get(str(cand.get("citation_key")), {})
-        ref = (
-            ref_by_s2.get(str(cand.get("ref_s2_id") or ""))
-            or ref_by_id.get(C.normalize_arxiv_id(str(cand.get("ref_arxiv_id") or "")) or "")
-            or {}
+        enriched = m3_string_features.enrich_candidate(
+            cand,
+            bib_by_key.get(str(cand.get("citation_key")), {}),
+            m3_string_features.find_ref(cand, ref_index),
         )
-        if bib:
-            enriched.setdefault("year", bib.get("year"))
-            enriched.setdefault("journal", bib.get("journal"))
-            enriched.setdefault("booktitle", bib.get("booktitle"))
-        if ref:
-            enriched.setdefault("ref_year", ref.get("ref_submission_date") or ref.get("year"))
-            enriched.setdefault("ref_venue", ref.get("ref_venue") or ref.get("venue"))
-
-        raw_feats = m3_string_features.compute_string_features(enriched)
-        prefixed = {f"str_{k}": float(raw_feats[k]) for k in str_feature_names if k in raw_feats}
+        feats = m3_string_features.compute_string_features(enriched)
         rows.append({
             "candidate_id": cand.get("candidate_id"),
             "arxiv_id": cand.get("arxiv_id"),
             "citation_key": cand.get("citation_key"),
             "ref_arxiv_id": cand.get("ref_arxiv_id"),
-            **prefixed,
+            **{f"str_{k}": float(feats[k]) for k in names},
         })
 
+    key_cols = {
+        "candidate_id": pd.Series(dtype="string"),
+        "arxiv_id": pd.Series(dtype="string"),
+        "citation_key": pd.Series(dtype="string"),
+        "ref_arxiv_id": pd.Series(dtype="string"),
+    }
     if rows:
         df = pd.DataFrame(rows)
-        for col in df.columns:
-            if col.startswith("str_"):
-                df[col] = df[col].astype("float32")
     else:
-        cols = {
-            "candidate_id": pd.Series(dtype="string"),
-            "arxiv_id": pd.Series(dtype="string"),
-            "citation_key": pd.Series(dtype="string"),
-            "ref_arxiv_id": pd.Series(dtype="string"),
-        }
-        for k in str_feature_names:
-            cols[f"str_{k}"] = pd.Series(dtype="float32")
-        df = pd.DataFrame(cols)
+        df = pd.DataFrame({**key_cols, **{f"str_{k}": pd.Series(dtype="float32") for k in names}})
+    for col in df.columns:
+        if col.startswith("str_"):
+            df[col] = df[col].astype("float32")
 
-    out_path = C.str_features_path(arxiv_id, data_dir)
+    out_path = C.str_features_path(_paper_arxiv_id(pdir), data_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(".parquet.tmp")
     df.to_parquet(tmp_path, index=False)
@@ -455,7 +323,7 @@ def merge_str_and_ctx_features(data_dir: Path) -> int:
         paper_stem = str_file.name[: -len(".str.parquet")]
         ctx_file = feat_dir / f"{paper_stem}.ctx.parquet"
         out_file = feat_dir / f"{paper_stem}.parquet"
-        if out_file.exists() and not ctx_file.exists():
+        if out_file.exists() and not ctx_file.exists() and out_file.stat().st_mtime >= str_file.stat().st_mtime:
             continue
         str_df = pq.read_table(str_file).to_pandas()
         if ctx_file.exists():
@@ -471,7 +339,18 @@ def merge_str_and_ctx_features(data_dir: Path) -> int:
     return merged_count
 
 
-def run_features_stage(data_dir: Path, workers: int = 1, strict: bool = False) -> Dict[str, Any]:
+def _str_features_stale(pdir: Path, str_pq: Path) -> bool:
+    """True khi .str.parquet chưa có hoặc cũ hơn dữ liệu đầu vào / mã tính feature."""
+    if not str_pq.exists():
+        return True
+    mtime = str_pq.stat().st_mtime
+    inputs = [pdir / "candidates.json", pdir / "bibtex_merged.json", pdir / "refs.json",
+              Path(m3_string_features.__file__)]
+    return any(p.exists() and p.stat().st_mtime > mtime for p in inputs)
+
+
+def run_features_stage(data_dir: Path, workers: int = 1, strict: bool = False,
+                       rebuild: bool = False) -> Dict[str, Any]:
     """Chạy bước features:
       1. Tính `str_*` của Tri (`m3_string_features`) -> `<paper_key>.str.parquet`.
       2. Với các bài có đủ `candidates.json` + `refs.json`, gọi `m3_context_features.run_stage`
@@ -487,7 +366,7 @@ def run_features_stage(data_dir: Path, workers: int = 1, strict: bool = False) -
     for pdir in paper_dirs:
         arxiv_id = _paper_arxiv_id(pdir)
         str_pq = C.str_features_path(arxiv_id, data_dir)
-        if not str_pq.exists() and (pdir / "candidates.json").exists():
+        if (pdir / "candidates.json").exists() and (rebuild or _str_features_stale(pdir, str_pq)):
             if build_paper_str_features_parquet(pdir, data_dir) is not None:
                 n_str_built += 1
         if (pdir / "candidates.json").exists() and (pdir / "refs.json").exists():
@@ -538,6 +417,7 @@ def run_pipeline(
     manual_min_refs: int = 22,
     seed: int = 42,
     workers: int = 1,
+    rebuild_features: bool = False,
     bench_out: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Chạy các bước M3 được chọn và ghi benchmark vào <data_dir>/benchmark/m3_benchmark.json."""
@@ -572,6 +452,7 @@ def run_pipeline(
                         data_dir=data_dir,
                         workers=workers,
                         strict=strict_stages,
+                        rebuild=rebuild_features,
                     )
 
                 elif stage == "train":
@@ -614,9 +495,16 @@ def run_pipeline(
                         member=eval_member_scope,
                         partition="all",
                     )
+                    by_part = eval_res.get("by_partition") or {}
                     overall_mrr = (eval_res.get("overall") or {}).get("mrr@5", 0.0)
+                    parts = " | ".join(
+                        f"{name} MRR@5={(by_part.get(name) or {}).get('mrr@5', float('nan')):.4f} "
+                        f"(Q={(by_part.get(name) or {}).get('q', 0)})"
+                        for name in ("test", "valid", "train")
+                    )
                     print(
-                        f"[m3] stage 'evaluate': overall MRR@5={overall_mrr:.4f} "
+                        f"[m3] stage 'evaluate': {parts} | "
+                        f"tất cả partition gộp (gồm train, KHÔNG dùng làm số báo cáo)={overall_mrr:.4f} "
                         f"(source={eval_res.get('evaluation_source', 'unknown')})"
                     )
                     stage_results["evaluate"] = eval_res
@@ -695,6 +583,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--max-shard-rows", type=int, default=None)
     parser.add_argument("--workers", type=int, default=1,
                         help="Số tiến trình song song cho bước features (mặc định: 1)")
+    parser.add_argument("--rebuild-features", action="store_true",
+                        help="Tính lại .str.parquet cho mọi bài (mặc định chỉ tính lại khi file cũ hơn dữ liệu/mã)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--manual-min-refs", type=int, default=22,
                         help="Số reference có arXiv ID tối thiểu khi sơ tuyển bài tay ở bước pick (mặc định: 22)")
@@ -735,6 +625,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         manual_min_refs=args.manual_min_refs,
         seed=args.seed,
         workers=args.workers,
+        rebuild_features=args.rebuild_features,
         bench_out=args.bench_out,
     )
     return 0

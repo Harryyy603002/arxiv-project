@@ -413,6 +413,13 @@ def build_predictions_from_corpus(
             if (normalized_id := _norm_id(raw_id)) is not None
         }
     )
+    # Nhóm scores một lần theo (arxiv_id, citation_key) thay vì quét cả bảng cho từng entry.
+    score_groups = {
+        key: group
+        for key, group in scores.groupby(
+            [scores["arxiv_id"].astype(str), scores["citation_key"].astype(str)], sort=False
+        )
+    }
     rows: List[dict[str, Any]] = []
     missing_label_files: List[str] = []
     papers_without_raw_validation: List[str] = []
@@ -501,10 +508,8 @@ def build_predictions_from_corpus(
                 )
 
             normalized_paper_id = _norm_id(arxiv_id)
-            subset = scores[
-                (scores["arxiv_id"] == normalized_paper_id)
-                & (scores["citation_key"] == citation_key)
-            ].copy()
+            found = score_groups.get((str(normalized_paper_id), citation_key))
+            subset = found.copy() if found is not None else scores.iloc[0:0].copy()
 
             if not subset.empty:
                 subset = subset[
