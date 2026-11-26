@@ -49,7 +49,7 @@ class BundleError(RuntimeError):
     """Lỗi chặn: gói/ghép không hợp lệ."""
 
 
-def _split_paper_ids(member_info: Dict[str, Any]) -> List[str]:
+def split_paper_ids(member_info: Dict[str, Any]) -> List[str]:
     """Mọi bài của một thành viên trong split (manual + auto; valid/test chỉ là tập con)."""
     seen: Dict[str, None] = {}
     for aid in list(member_info.get("manual") or []) + list(member_info.get("auto") or []):
@@ -86,7 +86,7 @@ def export_bundle(data_dir: Path, member: str, out_path: Path, strict: bool = Fa
     if not member_info:
         raise BundleError(f"split.json không có thành viên {member}.")
 
-    ids = _split_paper_ids(member_info)
+    ids = split_paper_ids(member_info)
     errors: List[str] = []
     warnings: List[str] = []
     files: List[Tuple[Path, str]] = []  # (đường dẫn thật, đường dẫn trong zip)
@@ -290,7 +290,7 @@ def merge_bundles(bundles: Sequence[Path], out_dir: Path, force: bool = False,
 
     summary = {}
     for member, info in ordered.items():
-        ids = _split_paper_ids(info)
+        ids = split_paper_ids(info)
         manifest = next(m for (m, _s, _z), p in zip(opened, bundles) if m.get("member") == member)
         pos = {a: v["positives"] for a, v in manifest["papers"].items()}
         summary[member] = {
