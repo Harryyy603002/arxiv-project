@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -67,6 +68,146 @@ def _feature_columns(path: Path) -> List[str]:
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Kiểm tra tuân thủ đề cho phần của MỘT thành viên (mỗi repo HF cá nhân phải tự đạt)
+# ---------------------------------------------------------------------------
+
+MANUAL_PAPERS_PER_MEMBER = 5
+MIN_AUTO_PAPERS_PER_MEMBER = 2          # 2*k với k = 1
+MIN_MANUAL_POSITIVES_TOTAL = 100        # 100*k với k = 1
+MIN_POSITIVES_PER_MANUAL_PAPER = 20
+AUTO_FRACTION = 0.10
+
+
+def _papers_in_range(data_dir: Path, member: str, member_info: Dict[str, Any]) -> Tuple[int, str]:
+    """Số bài của range: đếm paper.json thực tế; không có thì dùng số lúc pick đã ghi trong split."""
+    try:
+        from matching.m3_pick_papers import paper_json_ids
+        found = paper_json_ids(data_dir, member)
+        if found:
+            return len(found), "paper.json"
+    except Exception:  # pragma: no cover - không để lỗi phụ làm hỏng việc kiểm tra
+        pass
+    total = (member_info.get("selection_metadata") or {}).get("total_papers_in_range")
+    return (int(total), "split.json (không thấy paper.json)") if total else (0, "không xác định")
+
+
+def check_member_compliance(data_dir: Path, member: str, split: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Kiểm tra phần của `member` có tự thỏa bảng yêu cầu của đề (mục 2.2) hay không.
+
+    Đọc trực tiếp split.json và m3/labels/*.json, không dựa vào selection_metadata.
+    Trả về {"member", "ok", "rows": [(hạng mục, yêu cầu, thực tế, đạt)], "errors", "warnings"}.
+    """
+    from matching.m3_pick_papers import partition_map
+
+    data_dir = Path(data_dir)
+    errors: List[str] = []
+    warnings: List[str] = []
+    rows: List[Tuple[str, str, str, bool]] = []
+
+    def add(name: str, required: str, actual: Any, ok: bool, error: Optional[str] = None) -> None:
+        rows.append((name, required, str(actual), bool(ok)))
+        if not ok:
+            errors.append(error or f"{name}: cần {required}, hiện {actual}")
+
+    if member not in C.MEMBERS:
+        raise BundleError(f"Thành viên không hợp lệ: {member!r}. Chọn trong {C.MEMBERS}")
+    if split is None:
+        split_file = C.split_path(data_dir)
+        if not split_file.exists():
+            raise BundleError(f"Chưa có {split_file}. Chạy `run_m3.py --stage pick --member {member}` trước.")
+        split = _read_json(split_file)
+    info = (split.get("members") or {}).get(member)
+    if not info:
+        raise BundleError(f"split.json không có thành viên {member}.")
+
+    manual = [str(a) for a in info.get("manual") or []]
+    auto = [str(a) for a in info.get("auto") or []]
+
+    # --- cấu trúc split ---------------------------------------------------------------
+    try:
+        partitions = partition_map(split, member)
+        structure_ok, structure_msg = True, "hợp lệ"
+    except (ValueError, KeyError) as exc:
+        partitions, structure_ok, structure_msg = {}, False, str(exc)
+    add("Cấu trúc split (không trùng bài, valid/test thuộc manual/auto)", "hợp lệ", structure_msg, structure_ok,
+        f"split.json không hợp lệ: {structure_msg}")
+    out_of_range = [a for a in manual + auto if not C.in_range(a, member)]
+    add("Mọi bài thuộc đúng range của thành viên", "0 bài ngoài range", f"{len(out_of_range)} bài ngoài range",
+        not out_of_range, f"Bài ngoài range {C.MEMBER_RANGES[member]}: {out_of_range[:5]}")
+
+    # --- bài gán tay ------------------------------------------------------------------
+    add("Số bài gán tay (khác nhau)", f">= {MANUAL_PAPERS_PER_MEMBER}", len(set(manual)),
+        len(set(manual)) >= MANUAL_PAPERS_PER_MEMBER)
+    manual_ok, manual_positive_total = 0, 0
+    for aid in manual:
+        label_path = C.labels_path(aid, data_dir)
+        source = _read_json(label_path).get("source") if label_path.exists() else None
+        valid, label_errors, n_pos = validate_label_file(data_dir, aid, MIN_POSITIVES_PER_MANUAL_PAPER)
+        if source != "manual":
+            errors.append(f"{aid}: bài gán tay nhưng file nhãn có source={source!r}")
+        elif not valid:
+            errors.append(f"{aid}: bài gán tay không đạt (>= {MIN_POSITIVES_PER_MANUAL_PAPER} nhãn dương): {label_errors[:2]}")
+        else:
+            manual_ok += 1
+            manual_positive_total += n_pos
+    rows.append((f"Bài gán tay đạt (source=manual, >= {MIN_POSITIVES_PER_MANUAL_PAPER} nhãn dương, hợp lệ)",
+                 f"{len(manual)}/{len(manual)}", f"{manual_ok}/{len(manual)}", manual_ok == len(manual) and len(manual) > 0))
+    add("Tổng nhãn dương gán tay", f">= {MIN_MANUAL_POSITIVES_TOTAL}", manual_positive_total,
+        manual_positive_total >= MIN_MANUAL_POSITIVES_TOTAL)
+
+    # --- bài tự động ------------------------------------------------------------------
+    n_range, n_source = _papers_in_range(data_dir, member, info)
+    need_auto = max(MIN_AUTO_PAPERS_PER_MEMBER, math.ceil(AUTO_FRACTION * max(n_range - MANUAL_PAPERS_PER_MEMBER, 0)))
+    auto_ok, auto_bad = 0, []
+    for aid in auto:
+        label_path = C.labels_path(aid, data_dir)
+        if not label_path.exists():
+            auto_bad.append(f"{aid} (thiếu file nhãn)")
+            continue
+        source = _read_json(label_path).get("source")
+        valid, label_errors, n_pos = validate_label_file(data_dir, aid, 1)
+        if source != "auto":
+            auto_bad.append(f"{aid} (source={source!r})")
+        elif not valid or n_pos < 1:
+            auto_bad.append(f"{aid} (không có nhãn dương hợp lệ)")
+        else:
+            auto_ok += 1
+    if auto_bad:
+        errors.append(f"{len(auto_bad)} bài auto trong split không có nhãn dương hợp lệ: {auto_bad[:5]}"
+                      + (" ..." if len(auto_bad) > 5 else ""))
+    add(f"Bài auto có nhãn dương: 10% x ({n_range} - 5), range đếm theo {n_source}", f">= {need_auto}", auto_ok,
+        auto_ok >= need_auto, f"Bài auto có nhãn dương: {auto_ok}, cần >= {need_auto} (range {n_range} bài, theo {n_source})")
+
+    # --- test / valid / train ---------------------------------------------------------
+    for part in ("test", "valid"):
+        got = info.get(part) or {}
+        n_manual_part = len(got.get("manual") or [])
+        n_auto_part = len(got.get("auto") or [])
+        add(f"{part}: bài gán tay", "1", n_manual_part, n_manual_part == 1)
+        add(f"{part}: bài tự động", "1", n_auto_part, n_auto_part == 1)
+    train_manual = [a for a in manual if partitions.get(a) == "train"]
+    train_auto = [a for a in auto if partitions.get(a) == "train"]
+    want_train_manual = max(len(manual) - 2, 0)
+    add("train: bài gán tay (tất cả bài tay còn lại)", str(want_train_manual), len(train_manual),
+        structure_ok and len(train_manual) == want_train_manual)
+    add("train: bài tự động (tất cả bài auto còn lại)", ">= 1", len(train_auto), structure_ok and len(train_auto) >= 1)
+
+    return {"member": member, "ok": not errors, "rows": rows, "errors": errors, "warnings": warnings}
+
+
+def print_compliance(report: Dict[str, Any]) -> None:
+    print(f"\nKiểm tra tuân thủ đề cho {report['member']}:")
+    width = max(len(r[0]) for r in report["rows"])
+    for name, required, actual, ok in report["rows"]:
+        print(f"  [{'ĐẠT' if ok else 'LỖI'}] {name:<{width}} | cần {required} | hiện {actual}")
+    for err in report["errors"]:
+        print(f"  - LỖI: {err}")
+    for w in report["warnings"]:
+        print(f"  CẢNH BÁO: {w}")
+    print(f"=> {'ĐẠT TOÀN BỘ' if report['ok'] else 'CHƯA ĐẠT: ' + str(len(report['errors'])) + ' lỗi'}")
 
 
 # ---------------------------------------------------------------------------
@@ -139,23 +280,13 @@ def export_bundle(data_dir: Path, member: str, out_path: Path, strict: bool = Fa
                       f"Chạy lại `--stage features --rebuild-features`.")
     feature_columns = list(next(iter(distinct))) if distinct else []
 
-    # Yêu cầu của đề cho nhóm gán tay.
-    manual_ids = [str(a) for a in member_info.get("manual") or []]
-    if len(manual_ids) < MIN_MANUAL_PAPERS:
-        errors.append(f"Chỉ có {len(manual_ids)} bài gán tay trong split (cần >= {MIN_MANUAL_PAPERS}).")
-    for aid in manual_ids:
-        if sources.get(aid) not in (None, "manual"):
-            errors.append(f"{aid}: nằm trong nhóm gán tay nhưng file nhãn có source={sources.get(aid)!r}")
-        if positives.get(aid, 0) < MIN_MANUAL_POSITIVES:
-            errors.append(f"{aid}: bài gán tay mới có {positives.get(aid, 0)} nhãn dương (cần >= {MIN_MANUAL_POSITIVES}).")
-    for part in ("valid", "test"):
-        got = member_info.get(part) or {}
-        for kind in ("manual", "auto"):
-            if not got.get(kind):
-                warnings.append(f"split.{part} thiếu bài {kind}.")
+    # Yêu cầu của đề cho riêng phần của thành viên này (bài tay, quota auto, test/valid/train).
+    compliance = check_member_compliance(data_dir, member, split)
+    errors.extend(compliance["errors"])
+    warnings.extend(compliance["warnings"])
 
     report = {"member": member, "n_papers": len(ids), "errors": errors, "warnings": warnings,
-              "positives": positives, "n_files": len(files)}
+              "positives": positives, "n_files": len(files), "compliance": compliance}
     if errors and strict:
         raise BundleError("Không đóng gói vì có lỗi:\n- " + "\n- ".join(errors))
 
@@ -311,6 +442,8 @@ def merge_bundles(bundles: Sequence[Path], out_dir: Path, force: bool = False,
 
 def _print_export(report: Dict[str, Any]) -> None:
     print(f"Thành viên {report['member']}: {report['n_papers']} bài, {report['n_files']} file.")
+    if report.get("compliance"):
+        print_compliance(report["compliance"])
     for w in report["warnings"]:
         print(f"  CẢNH BÁO: {w}")
     if report["errors"]:
@@ -332,6 +465,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ex.add_argument("--out", type=Path, default=None, help="Mặc định: bundle_<member>.zip")
     ex.add_argument("--strict", action="store_true", help="Không tạo gói nếu còn lỗi")
 
+    ck = sub.add_parser("check", help="Chỉ kiểm tra phần của một thành viên có đạt yêu cầu của đề không")
+    ck.add_argument("--data-dir", type=Path, default=C.DATA_DIR)
+    ck.add_argument("--member", required=True, choices=list(C.MEMBERS))
+
     mg = sub.add_parser("merge", help="Ghép các gói thành một thư mục data chung")
     mg.add_argument("bundles", nargs="+", type=Path)
     mg.add_argument("--out-dir", type=Path, required=True)
@@ -340,6 +477,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     args = ap.parse_args(argv)
     try:
+        if args.cmd == "check":
+            report = check_member_compliance(args.data_dir, args.member)
+            print_compliance(report)
+            return 0 if report["ok"] else 1
         if args.cmd == "export":
             report = export_bundle(args.data_dir, args.member, args.out or Path(f"bundle_{args.member}.zip"), args.strict)
             _print_export(report)
