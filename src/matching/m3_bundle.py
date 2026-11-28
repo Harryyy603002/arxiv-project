@@ -49,7 +49,6 @@ MIN_MANUAL_PAPERS = 5
 class BundleError(RuntimeError):
     """Lỗi chặn: gói/ghép không hợp lệ."""
 
-
 def split_paper_ids(member_info: Dict[str, Any]) -> List[str]:
     """Mọi bài của một thành viên trong split (manual + auto; valid/test chỉ là tập con)."""
     seen: Dict[str, None] = {}
@@ -175,7 +174,7 @@ def check_member_compliance(data_dir: Path, member: str, split: Optional[Dict[st
             auto_bad.append(f"{aid} (không có nhãn dương hợp lệ)")
         else:
             auto_ok += 1
-    if auto_bad:
+    if auto_bad and auto_ok < need_auto:
         errors.append(f"{len(auto_bad)} bài auto trong split không có nhãn dương hợp lệ: {auto_bad[:5]}"
                       + (" ..." if len(auto_bad) > 5 else ""))
     add(f"Bài auto có nhãn dương: 10% x ({n_range} - 5), range đếm theo {n_source}", f">= {need_auto}", auto_ok,
@@ -235,6 +234,8 @@ def export_bundle(data_dir: Path, member: str, out_path: Path, strict: bool = Fa
     positives: Dict[str, int] = {}
     sources: Dict[str, str] = {}
 
+    manual_set = set(member_info.get("manual") or [])
+
     for aid in ids:
         if not C.in_range(aid, member):
             errors.append(f"{aid}: không thuộc range của {member} {C.MEMBER_RANGES[member]}")
@@ -251,8 +252,10 @@ def export_bundle(data_dir: Path, member: str, out_path: Path, strict: bool = Fa
             sources[aid] = str(_read_json(label_path).get("source"))
             if not valid:
                 errors.append(f"{aid}: file nhãn không hợp lệ: {label_errors[:3]}")
+            elif n_pos == 0 and aid in manual_set:
+                errors.append(f"{aid}: bài gán tay không có nhãn dương nào")
             elif n_pos == 0:
-                errors.append(f"{aid}: không có nhãn dương nào")
+                warnings.append(f"{aid}: bài auto không có nhãn dương nào (sẽ không dùng để train)")
             files.append((label_path, f"data/m3/labels/{pk}.json"))
 
         feat_path = C.features_path(aid, data_dir)
