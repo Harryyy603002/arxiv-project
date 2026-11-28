@@ -186,3 +186,14 @@ def test_label_paper_no_match(tmp_path):
     assert result["labels"].get("somekey") is None  # no match -> absent, not ''
     row = next(r for r in result["rows"] if r["citation_key"] == "somekey")
     assert row["groundtruth_arxiv_id"] == ""
+
+
+def test_label_paper_entries_no_candidates(tmp_path):
+    pdir = tmp_path / "empty_paper"
+    pdir.mkdir()
+    result = label_paper_entries(pdir, arxiv_id="2301.00003")
+    assert result["rows"] == []
+    assert result["labels"] == {}
+    assert result["evidence"] == {}
+    assert result["n_ambiguous"] == 0
+

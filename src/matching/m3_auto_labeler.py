@@ -268,10 +268,16 @@ def label_corpus(
 
         result = label_paper_entries(pdir, arxiv_id, min_title_sim)
         if not result["rows"]:
-            # Không còn candidate nào: nhãn auto của lần chạy trước (nếu có) đã lỗi thời, phải xóa.
+            # Không có candidate nào (thường do refs.json thiếu arXiv ID).
             if write_json and source == "auto":
-                label_path.unlink()
-                stats["n_json_removed"] += 1
+                # Lần trước cũng không có candidate; giữ file rỗng (đừng xóa).
+                pass
+            elif write_json and source is None:
+                # Tạo file rỗng để bundle check không báo thiếu.
+                payload = {"arxiv_id": arxiv_id, "source": "auto", "labeler": AUTO_LABELER_NAME,
+                           "labels": {}, "evidence": {}}
+                _atomic_write_json(label_path, payload)
+                stats["n_json_written"] += 1
             continue
         stats["n_papers_labeled"] += 1
         stats["n_ambiguous_entries"] += result["n_ambiguous"]
@@ -285,8 +291,14 @@ def label_corpus(
             continue
         if not labels:
             if source == "auto":
-                label_path.unlink()
-                stats["n_json_removed"] += 1
+                # Lần trước cũng không match được; giữ file rỗng (đừng xóa).
+                pass
+            else:
+                # Chưa có file: tạo file rỗng để bundle check không báo thiếu.
+                payload = {"arxiv_id": arxiv_id, "source": "auto", "labeler": AUTO_LABELER_NAME,
+                           "labels": {}, "evidence": {}}
+                _atomic_write_json(label_path, payload)
+                stats["n_json_written"] += 1
             continue
         payload = {"arxiv_id": arxiv_id, "source": "auto", "labeler": AUTO_LABELER_NAME,
                    "labels": labels, "evidence": evidence}
